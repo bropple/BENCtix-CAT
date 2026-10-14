@@ -137,5 +137,15 @@ your own phone's copies to build an image.
 
 ## Licence
 
-Each source file names its licence (SPDX): the interface and its apps are MIT,
-the system daemons GPL-2.0-only.
+[MIT](LICENSE), except where a file says otherwise:
+
+- Files whose `SPDX-License-Identifier` is `GPL-2.0-only` (several system
+  daemons, such as `s22-calld`, `s22-smsd` and `s22-outerd`) are under the
+  [GNU GPL version 2](LICENSES/GPL-2.0-only.txt). So is
+  `packaging/s22-outerd/fonts.h`, the Linux kernel's console font.
+- Code from other projects keeps its own licence: `libretro.h` (libretro's
+  API header), the wlroots layer-shell protocol file, and the patches in
+  `packaging/` to other projects.
+- The packages this builds install other projects' software (Arch Linux
+  ARM's packages, the kernel, lk2nd, AOSP's sounds, Mepo, ...) under their
+  own licences.
