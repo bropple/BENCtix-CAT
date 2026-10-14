@@ -2272,3 +2272,26 @@ state files (battery, cell, Bluetooth, GPS, a call), and iw's link.
 WebKit runs without its own sandbox there (none nests in bubblewrap) and
 with software GL. The tooling stays local; a dozen of the screenshots (dummy
 data only, PNGs without metadata) are in docs/screenshots for the README.
+
+## D088 Installing without root: the phone's files through lk2nd (2026-10-14)
+
+INSTALL.md takes a stock phone to BENCtix-CAT with an unlocked bootloader
+and no root. Root was only ever how this project read partitions; lk2nd's
+fastboot reads any partition (`fastboot fetch`, max-fetch-size 0x1ff00000):
+persist fetched from it matched the running system's SHA-256 byte for byte.
+
+- tools/fetch-from-lk2nd.sh reads the backup (persist, modemst1, modemst2,
+  fsg, fsc) and what the firmware comes from (modem, dtbobak, super), with
+  checksums; it checks the device is lk2nd and writes nothing to the phone.
+- The stock dtbo survives lk2nd's: the phone has a dtbobak partition, still
+  byte-identical to the stock (and OTA V30) dtbo after lk2nd's went into
+  dtbo. It is what the outer screen's init sequence is read from.
+- tools/extract-firmware.sh lays the firmware out where config.sh points
+  (mtools, debugfs, lpunpack, mkdtboimg, pil-squasher, s22flip-linux's
+  mkmipidbi.py and sns-reg-groups.py; the GPU microcode from linux-firmware,
+  downloaded if the PC has none). Run on this phone's backup it produced a
+  tree identical to the firmware in use, sns.reg and the group table too.
+- Only a way back to Android needs more: the stock boot.img, from the OTA
+  packages shared on XDA (thread 4626971: V29 full and V30 incremental, rebuilt with
+  imgpatch.py; their SHA-256s are in INSTALL.md) or saved with root first.
+  It goes back from the stock fastboot, since lk2nd's writes behind itself.

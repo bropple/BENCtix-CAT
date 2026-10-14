@@ -30,6 +30,9 @@ Every choice behind it, from the boot chain to the music visualizer, is written
 down with its reason in **[87 decisions](docs/DECISIONS.md)**. How to use the
 phone is in the **[manual](MANUAL.md)**.
 
+**[Installing it](INSTALL.md)** takes an unlocked bootloader, not root: the
+firmware and a backup of your calibration are read back through lk2nd.
+
 ## What works
 
 | | |
@@ -97,7 +100,8 @@ lk2nd (boot partition)                     reads /extlinux/extlinux.conf
 
 ## Building
 
-On an x86_64 Arch-family host with `aarch64-linux-gnu-gcc`, `makepkg`, and
+The whole path from a stock phone is in [INSTALL.md](INSTALL.md). On an
+x86_64 Arch-family host with `aarch64-linux-gnu-gcc`, `makepkg`, and
 qemu-user-static registered for aarch64. Builder-specific settings (your
 timezone, ...) go in an untracked `config.local.sh` over `config.sh`.
 
