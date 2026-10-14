@@ -1,0 +1,14 @@
+Messages
+Up, Down	Choose a conversation (newest first; unread ones are counted).
+OK	Open it.
+Call	Call that person.
+*	Save the number to Contacts, or show its contact.
+Back	Close Messages.
+- The first row starts a new message: it asks for the number first.
+
+# In a conversation
+Keypad	Type a reply (see Typing).
+OK	Send.
+Back	Back to the list.
+- Opening a conversation marks it read and clears its notifications.
+- Pictures and group messages (MMS) do not work yet.

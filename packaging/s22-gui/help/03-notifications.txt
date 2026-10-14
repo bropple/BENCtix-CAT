@@ -1,0 +1,28 @@
+Notifications and quick settings
+# Notifications (side key)
+Up, Down	Choose one.
+OK	Open it in its app (and dismiss it).
+C	Dismiss it.
+#	Dismiss them all.
+Back, side key	Close the list.
+- New notifications drop in at the top as a banner; tap it to open the list.
+
+# Music in the list
+- While a song is loaded, its card heads the list, chosen when the list opens: the cover, title, artist, the buttons and where the song is.
+OK	Play or pause.
+C	Stop (the card goes; the queue stays in Music).
+Left, Right	The song before or after; held, scrub back or ahead.
+Down	To the notifications (Up from the first one comes back).
+- Tap the buttons, or the bar to jump there.
+- Dismissing only removes the alert: the message stays in its app.
+
+# Quick settings (side key twice)
+Arrows	Move between the tiles.
+OK	Switch the tile.
+Left, Right	On the brightness bar: dimmer or brighter.
+- Tiles: Wi-Fi, Bluetooth, Cellular (the radio), Mobile data, Sound (on, vibrate only, silent), Flashlight and Mullvad VPN.
+
+# On the lock screen
+- The side key opens notifications and quick settings there too.
+- Opening a notification asks for the PIN first, then opens it.
+- Cellular, Mobile data and Mullvad show a padlock: they only switch when unlocked.

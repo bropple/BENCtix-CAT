@@ -1,0 +1,18 @@
+#!/bin/sh
+# sd-run: run a program pacman-sd put on the SD card (D046). The card's
+# layers (/usr, /etc, /var) lie under the phone's in a bubblewrap sandbox
+# (overlayfs, read-only), so the program finds its files where it expects
+# them, and the phone's own files always win, whatever the card holds.
+# Everything else (home, /run, devices, the GUI's sockets) is as outside.
+#   sd-run PROGRAM [ARGS...]
+ROOT=${PACMAN_SD_ROOT:-/home/.pacman-sd}
+
+[ $# -ge 1 ] || { echo "usage: sd-run PROGRAM [ARGS...]" >&2; exit 2; }
+[ -d "$ROOT/layers/usr" ] || { echo "sd-run: nothing on the card ($ROOT)" >&2; exit 1; }
+
+# Mounts in order: everything, then each layer of the card under the phone's
+for l in var etc usr; do
+	set -- --overlay-src "$ROOT/layers/$l" --overlay-src "/$l" --ro-overlay "/$l" "$@"
+done
+set -- --dev-bind / / "$@"
+exec bwrap "$@"

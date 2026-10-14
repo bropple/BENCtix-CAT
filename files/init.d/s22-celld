@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Cellular status (/run/s22-cell/state) for the status bars, and a watchdog
+# that cycles the radio when registration stays short of full service.
+
+description="Cellular status and registration watchdog"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-celld
+command_args="${CELLD_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-celld.log
+error_log=/var/log/s22-celld.log
+
+depend() {
+	need rmtfs
+	after tqftpserv s22-smsd s22-imsd
+}

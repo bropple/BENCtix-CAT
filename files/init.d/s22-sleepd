@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Suspend while the lid is closed and nothing needs the phone awake
+# (s22-sleepd, D070): no call, nothing playing, the outer screen dark, no
+# USB data connection. The lid, the keys, a call or a text wake it.
+
+description="Suspend while the lid is closed"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-sleepd
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/s22-sleepd.log
+error_log=/var/log/s22-sleepd.log
+
+depend() {
+	need localmount s22-lidd
+	after s22-call s22-outerd tailscaled
+}

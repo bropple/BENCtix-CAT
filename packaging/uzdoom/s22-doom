@@ -1,0 +1,13 @@
+#!/bin/sh
+# s22-doom: UZDoom on the S22 Flip. The window's app ID puts the keypad in
+# game mode (s22-t9d: OK is Enter, Back Escape, Call Ctrl, # Tab, * KP*),
+# and the first start gets the phone's settings (no mouselook, no mouse:
+# the touchscreen would turn the view, GLES, keypad controls). Games go in
+# ~/Games/doom on the SD card.
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/uzdoom
+mkdir -p "$cfg" "$HOME/Games/doom"
+[ -f "$cfg/uzdoom.ini" ] || cp /usr/share/s22-doom/uzdoom.ini "$cfg/uzdoom.ini"
+# (UZDoom names its window with the X11 variable, which also sets the
+# Wayland app ID, unless it is set already)
+export SDL_VIDEO_X11_WMCLASS=game-doom SDL_APP_ID=game-doom
+exec /usr/bin/uzdoom "$@"

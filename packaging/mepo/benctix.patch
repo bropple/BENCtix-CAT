@@ -1,0 +1,76 @@
+diff --git a/src/Mepo.zig b/src/Mepo.zig
+index df3dd62..960f132 100644
+--- a/src/Mepo.zig
++++ b/src/Mepo.zig
+@@ -227,6 +227,27 @@ fn event_mousewheel(mepo: *Self, e: sdl.SDL_Event) types.Pending {
+     return .Redraw;
+ }
+ 
++// BENCtix-CAT: the keypad phone's D-pad and OK as keys, on press and while
++// held (repeat): the arrows run what h j k l are bound to, Return what x is,
++// Tab (the keypad's #) what g is
++// (bind_key only takes single characters, and keyup has no repeat)
++fn event_keydown(mepo: *Self, e: sdl.SDL_Event) types.Pending {
++    const char: u8 = switch (e.key.keysym.scancode) {
++        sdl.SDL_SCANCODE_LEFT => 'h',
++        sdl.SDL_SCANCODE_DOWN => 'j',
++        sdl.SDL_SCANCODE_UP => 'k',
++        sdl.SDL_SCANCODE_RIGHT => 'l',
++        sdl.SDL_SCANCODE_RETURN => 'x',
++        sdl.SDL_SCANCODE_TAB => 'g', // #, in game mode: search
++        else => return .None,
++    };
++    if (mepo.table_keybindings.get(.{ .key = char, .keymod = 0 })) |run_expression| {
++        mepo.jsonapi_execute(run_expression) catch unreachable;
++        return .Redraw;
++    }
++    return .None;
++}
++
+ fn event_keyup(mepo: *Self, e: sdl.SDL_Event) types.Pending {
+     if (sdl.SDL_TRUE == sdl.SDL_IsTextInputActive() and
+         e.key.keysym.mod == 0) return .None;
+@@ -518,6 +539,7 @@ pub fn sdl_event_loop(mepo: *Self) !void {
+                 else if (mepo.shellpipe_sync_pid == null) switch (e.type) {
+                     sdl.SDL_FINGERDOWN => &event_fingerdown,
+                     sdl.SDL_FINGERUP => &event_fingerup,
++                    sdl.SDL_KEYDOWN => &event_keydown,
+                     sdl.SDL_KEYUP => &event_keyup,
+                     sdl.SDL_MOUSEBUTTONDOWN => &event_mousebuttondown,
+                     sdl.SDL_MOUSEBUTTONUP => &event_mousebuttonup,
+diff --git a/src/api/pin_add.zig b/src/api/pin_add.zig
+index b849984..577e4ce 100644
+--- a/src/api/pin_add.zig
++++ b/src/api/pin_add.zig
+@@ -23,11 +23,16 @@ fn pin_add(mepo: *Mepo, group: i32, is_structural: bool, lat: f64, lon: f64, han
+     const pin_group: usize = if (group < 0) mepo.pin_group_active else @intCast(group);
+     defer mepo.blit_pinlayer_cache.clearAndFree();
+ 
+-    // E.g. nop if adding a pin_handle that already exists
++    // A pin_handle that already exists: the pin moves there (BENCtix-CAT:
++    // the position pin follows the GPS; it stayed at the first fix)
+     if (handle.len != 0) {
+-        for (mepo.pin_groups[pin_group].items) |pin| {
++        for (mepo.pin_groups[pin_group].items) |*pin| {
+             if (pin.handle) |pin_handle| {
+-                if (std.mem.eql(u8, pin_handle, handle)) return;
++                if (std.mem.eql(u8, pin_handle, handle)) {
++                    pin.lat = lat;
++                    pin.lon = lon;
++                    return;
++                }
+             }
+         }
+     }
+diff --git a/src/config.zig b/src/config.zig
+index f3d3abd..ee39e11 100644
+--- a/src/config.zig
++++ b/src/config.zig
+@@ -1,6 +1,6 @@
+ pub const Version = "1.3.4";
+ pub const DownloadTimeoutSeconds = 5;
+-pub const DownloadUseragent = "mepo";
++pub const DownloadUseragent = "mepo/1.3.4 (BENCtix-CAT)";
+ pub const DownloaderPollMs = 50;
+ pub const TitleUpdateFrequencyMs = 2000;
+ pub const InitWindowH = 950;

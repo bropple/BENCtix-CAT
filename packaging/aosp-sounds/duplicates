@@ -1,0 +1,46 @@
+# Sounds left out of aosp-sounds: the same audio as another (found by
+# decoding every sound and comparing waveforms, 2026-10-08; Themos was
+# found by ear, then by a cross-correlation over every pair). The one
+# kept: a classic name (Ring_, F1_, Alarm_), else one not ALL CAPS,
+# lower case, ringtoneNN or _proc48, else the older set's
+# (top level before ogg/ and material/).
+alarms/Barium.ogg	# = Analysis
+alarms/Cesium.ogg	# = Alarm_Classic
+alarms/Departure.ogg	# = Alarm_Classic
+alarms/Fermium.ogg	# = Argon
+alarms/Helium.ogg	# = Hassium
+alarms/Krypton.ogg	# = FireDrill
+alarms/Neptunium.ogg	# = Carbon
+alarms/Nobelium.ogg	# = Neon
+alarms/Oxygen.ogg	# = Alarm_Classic
+alarms/Plutonium.ogg	# = FireDrill
+alarms/Promethium.ogg	# = Platinum
+alarms/Timing.ogg	# = Scandium
+notifications/Argon.ogg	# = Tejat (Android 4's default notification)
+notifications/Ariel.ogg	# = Adara
+notifications/Canopus.ogg	# = F1_MissedCall
+notifications/Lalande.ogg	# = Cobalt
+notifications/Selenium.ogg	# = Acrux
+notifications/Shaula.ogg	# = Io
+notifications/Sirrah.ogg	# = F1_New_MMS
+notifications/SpaceSeed.ogg	# = CetiAlpha
+notifications/Tejat_proc48.ogg	# = Tejat
+notifications/Tinkerbell.ogg	# = Merope
+notifications/arcturus.ogg	# = Arcturus
+notifications/circios.ogg	# = Strontium
+notifications/horkos.ogg	# = Thallium
+notifications/nomos1.ogg	# = Palladium
+notifications/ouranos.ogg	# = Rubidium
+notifications/phantasos.ogg	# = Xenon
+notifications/vega.ogg	# = Vega
+ringtones/ANDROMEDA.ogg	# = Andromeda
+ringtones/BOOTES.ogg	# = Bootes
+ringtones/CANISMAJOR.ogg	# = CanisMajor
+ringtones/Dione.ogg	# = Atria
+ringtones/Girtab.ogg	# = Cassiopeia
+ringtones/PERSEUS.ogg	# = Perseus
+ringtones/Pyxis.ogg	# = Ring_Digital_02
+ringtones/Sedna.ogg	# = Ring_Digital_02
+ringtones/Themos.ogg	# = Titania
+ringtones/hydra.ogg	# = Hydra
+ringtones/ringtone27.ogg	# = Acheron

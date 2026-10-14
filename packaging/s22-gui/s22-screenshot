@@ -1,0 +1,16 @@
+#!/bin/sh
+# s22-screenshot: the screen as it is now, into ~/Pictures/screenshots as a
+# JPEG (Photos shows it), with a notification that opens it (D052). Colour
+# is kept at full resolution (no chroma subsampling: text and icon edges
+# stay clean) at quality 95, so cjpeg encodes rather than grim. s22-wm
+# runs it for End + Volume Down.
+#   s22-screenshot          prints the file's path
+dir="$HOME/Pictures/screenshots"
+mkdir -p "$dir" || exit 1
+f="$dir/Screenshot_$(date +%Y%m%d-%H%M%S).jpg"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/s22-gui}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+grim -t ppm - | cjpeg -quality 95 -sample 1x1 -optimize -outfile "$f" || exit 1
+[ -s "$f" ] || { rm -f -- "$f"; exit 1; }
+s22-notify -s screenshot -o "file:$f" "Screenshot saved" 2>/dev/null
+echo "$f"

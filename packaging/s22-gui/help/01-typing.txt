@@ -1,0 +1,20 @@
+Typing on the keypad
+# Letters and numbers
+2 to 9	Letters: tap for the first (2 is a b c 2), tap again within a second for the next. Hold for the digit.
+1	Common punctuation: . , ? ! - / _ : ; ' "
+0	Space. Hold for 0.
+*	Every symbol. The order depends on what you are typing: the Shell's favourites first in the Shell, a message's in messages, a web address's in the browser's address bar.
+#	The mode: abc, Abc (the next letter capital), ABC, 123.
+C	Deletes the character before the cursor.
+
+# The T9 helper
+- While you type, the status bar shows the mode, and the key you are tapping with its characters, the current one highlighted.
+- A long list (like *) takes the whole bar while you tap, and slides along so the current character stays in view.
+- At a password prompt only stars show, and only the newest character in the clear until its second is over.
+
+# In the Shell and other text windows
+Back	Esc.
+Home held	Tab.
+Recents	Ctrl for the next key: Recents then C is Ctrl+C, Recents then Left is Ctrl+Left.
+Recents held	Ctrl+C twice: quits programs that ask for it twice.
+OK, Call	Enter.

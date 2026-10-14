@@ -1,0 +1,25 @@
+Photos
+# The grid
+Arrows	Move.
+OK	Open a photo or wallpaper.
+*	The other tab: Photos, Wallpapers.
+Back	Close Photos.
+- Photos: everything in Pictures and its folders, newest first: the camera's photos and your screenshots.
+- Wallpapers: the pictures in Wallpapers/inner (home and lock screens) and Wallpapers/outer (the outer screen, marked "outer") on the memory card. PNG, JPEG, GIF and more.
+
+# A photo
+Left, Right	The photo before or after (or swipe).
+Up, Down	Zoom: 1x, 2x, 4x.
+2 4 6 8	Move around a zoomed photo (or drag).
+OK	Move it to the wallpapers: for the home and lock screens, or the outer screen.
+#	Its details.
+C	Delete it (OK to confirm).
+Back	Back to the grid.
+
+# A wallpaper
+- Shown as it will look: on the home screen, or on the outer screen (three times the size, moving at the speed set in Settings, Outer screen).
+Left, Right	The one before or after.
+OK	Set it: home screen, lock screen or both; or the outer screen.
+C	Delete it (OK to confirm).
+Back	Back to the grid.
+- From Settings (Display, Outer screen) Photos shows that screen's wallpapers only: OK sets one, * sets none, and Photos closes.

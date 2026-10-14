@@ -1,0 +1,10 @@
+#!/bin/sh
+# s22-lidd hook: the lid's state for s22-sleepd (D070), which suspends the
+# phone while the lid is closed and nothing needs it awake.
+# Argument: open | closed (from s22-lidd).
+case "${1:-}" in
+open|closed) ;;
+*)	echo "usage: $0 open|closed" >&2; exit 2 ;;
+esac
+mkdir -p /run/s22-sleep
+echo "$1" > /run/s22-sleep/lid.new && mv -f /run/s22-sleep/lid.new /run/s22-sleep/lid

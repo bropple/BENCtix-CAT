@@ -1,0 +1,16 @@
+# Refuse any transaction that would install or upgrade systemd (BENCtix
+# D362). Removal is not blocked.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = systemd
+Target = systemd-libs
+Target = systemd-sysvcompat
+
+[Action]
+Description = BENCtix-CAT: checking for systemd
+When = PreTransaction
+Exec = /usr/local/bin/benctix-cat-refuse-systemd
+NeedsTargets
+AbortOnFail

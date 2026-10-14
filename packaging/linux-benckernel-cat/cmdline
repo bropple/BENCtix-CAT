@@ -1,0 +1,1 @@
+root=PARTLABEL=userdata rootfstype=btrfs rootflags=compress=zstd:3 rootwait rw console=tty0 loglevel=4 clk_ignore_unused pd_ignore_unused psi=0 panic=10

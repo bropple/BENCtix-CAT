@@ -1,0 +1,782 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-celld: cellular status for the screens, and a registration watchdog.
+
+Follows the modem's registration and signal through QMI NAS indications
+(no polling: the modem reports a change of serving system, and signal
+changes across the bar thresholds) and keeps STATE up to date, key=value
+lines for the status bars. While the lid is closed (/run/s22-sleep/lid)
+the signal reports are off, so a fluctuating signal does not wake the
+suspended phone (D070); the bars are read again after every resume
+(s22-sleepd touches /run/s22-sleep/resumed) and when the lid opens:
+
+  service=full|limited|none   registered / emergency only / no network
+  tech=lte|umts|gsm|...       radio in use ("" without service)
+  bars=0..4                   from LTE RSRP or the RSSI otherwise
+  operator=NAME               the network's name, or MCCMNC
+
+Watchdog: after a network drop the modem was seen to stay camped on another
+operator's cell in limited (emergency only) service although its own
+network was back, until the radio was cycled. If service stays short of
+full for STUCK_S, the radio is cycled (low power, then online: a new
+search and attach, ordinary phone behaviour), at most once per RETRY_S.
+When service comes back after a loss, s22-imsd gets SIGHUP so it offers
+the IMS data service to the modem again (the modem's IMS does not ask for
+its PDN again otherwise).
+
+Mobile data: the internet PDN (WDS profile 1) on bam-dmux channel DATA_MUX,
+its own interface beside s22-imsd's IMS on channel 0. Cellular is never
+used for ordinary traffic while WiFi works:
+  - internet: with mobile_data=on in the settings, full service, and WiFi
+    without a default route for SETTLE_S, the link comes up with default
+    routes (metric DATA_METRIC, never ahead of WiFi) and its DNS servers
+    (openresolv); once WiFi has a default route for SETTLE_S it goes down;
+  - holds: a client of CTL (root:wheel 0660) sending "hold NAME" gets the
+    link for itself, WiFi or not (MMS, which only the carrier's network
+    reaches; the ping test), but without default routes: only a program
+    bound to the interface uses it. The answer is "ok IFACE" once it is up
+    (or "error ..."); the connection is the hold, closing it releases.
+Router advertisements are off on the interface, so nothing else can give
+it a route. STATE gains data=up|down, data_mode=internet|hold,
+data_iface=, data_dns= (the carrier's DNS servers, for holders), and the
+modem's state for Settings: modem= (operating mode), apn=, pdp= (profile 1).
+
+Cellular off (D045): with cellular=off in the settings (Settings, quick
+settings) the modem's radio is put in low-power mode, off the network (no
+calls, texts or data; WiFi and Bluetooth go on), the watchdog leaves it
+alone, and mobile data stays down; cellular=on puts it back online. It
+holds across restarts. STATE has radio=on|off.
+
+  s22-celld [-v]
+"""
+import ipaddress, os, signal, socket, struct, subprocess, sys, time
+
+STATE_DIR = "/run/s22-cell"
+STATE = STATE_DIR + "/state"
+STUCK_S = 300
+RETRY_S = 900
+CYCLE_PAUSE_S = 5
+RSRP_BARS = [-115, -105, -95, -85]      # dBm, LTE
+RSSI_BARS = [-107, -101, -95, -89]      # dBm, GSM/UMTS
+IMSD = "/usr/bin/s22-imsd"
+SETTINGS = "/var/lib/s22/settings"
+SLEEP_DIR = "/run/s22-sleep"   # s22-lidd's hook (lid) and s22-sleepd (resumed), D070
+CTL = STATE_DIR + "/ctl"
+DATA_MUX = 1
+DATA_PROFILE = 1
+WIFI_IF = "wlan0"
+SETTLE_S = 10
+DATA_METRIC = 4000
+DATA_TABLE = 1001       # routes for sockets bound to the interface (holds),
+                        # and its rule's priority: ahead of Tailscale's (5210)
+                        # and wg-quick's (Mullvad)
+# T-Mobile networks are IPv6-only: an IPv4 call there gets an address from
+# the 464XLAT range and needs a CLAT on the phone, so it is dropped; DNS64
+# gives IPv4-only names IPv6 addresses.
+CLAT_NET = ipaddress.ip_network("192.0.0.0/29")
+verbose = "-v" in sys.argv[1:]
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), "s22-celld:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+def bars(value, thresholds):
+    return sum(1 for t in thresholds if value >= t)
+
+
+def write_state(st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    text = "service=%s\ntech=%s\nbars=%d\noperator=%s\n" % (
+        st["service"], st["tech"], st["bars"] if st["service"] != "none" else 0,
+        st["operator"])
+    d = st.get("data") or {}
+    text += "radio=%s\n" % ("off" if st.get("radio") is False else "on")
+    text += "data=%s\ndata_mode=%s\ndata_iface=%s\ndata_dns=%s\n" % (
+        "up" if d.get("iface") else "down", d.get("mode", ""),
+        d.get("iface", ""), " ".join(d.get("dns", [])))
+    text += "modem=%s\napn=%s\npdp=%s\n" % (
+        st.get("modem", ""), st.get("apn", ""), st.get("pdp", ""))
+    try:
+        with open(STATE + ".new", "w") as f:
+            f.write(text)
+        os.replace(STATE + ".new", STATE)
+    except OSError as e:
+        log("state: %s" % e)
+
+
+def run(*cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        dbg("%s: %s" % (" ".join(cmd), r.stderr.strip()))
+    return r.returncode == 0
+
+
+def setting(key, default=""):
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == key:
+                    return v
+    except OSError:
+        pass
+    return default
+
+
+def wifi_has_route():
+    """A default route out of WiFi, IPv4 or IPv6"""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                p = line.split()
+                if p[0] == WIFI_IF and p[1] == "00000000" and int(p[7], 16) == 0:
+                    return True
+        with open("/proc/net/ipv6_route") as f:
+            for line in f:
+                p = line.split()
+                if p[9] == WIFI_IF and p[0] == "0" * 32 and p[1] == "00":
+                    return True
+    except (OSError, IndexError, ValueError):
+        pass
+    return False
+
+
+def channel_iface(ch):
+    """The bam-dmux interface of a channel (dev_port is the channel)"""
+    for name in os.listdir("/sys/class/net"):
+        if not name.startswith("wwan"):
+            continue
+        try:
+            with open("/sys/class/net/%s/dev_port" % name) as f:
+                if int(f.read()) == ch:
+                    return name
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def imsd_pids():
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if IMSD.encode() in argv[:2]:
+            yield int(pid)
+
+
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=30):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb),
+         dev.open_finish)
+
+    def client(service):
+        return wait(lambda cb: dev.allocate_client(service, 0, 10, None, cb),
+                    dev.allocate_client_finish)
+
+    nas = client(Qmi.Service.NAS)
+    dms = client(Qmi.Service.DMS)
+    st = {"service": "none", "tech": "", "bars": 0, "operator": "",
+          "short_since": time.monotonic(), "lost": False, "last_cycle": -RETRY_S,
+          "timer": 0}
+
+    def arm_watchdog():
+        if not st["timer"]:
+            st["timer"] = GLib.timeout_add_seconds(STUCK_S, watchdog)
+
+    def disarm_watchdog():
+        if st["timer"]:
+            GLib.source_remove(st["timer"])
+            st["timer"] = 0
+
+    def cycle_radio():
+        log("service short of full for %d s; cycling the radio" % STUCK_S)
+        st["last_cycle"] = time.monotonic()
+        try:
+            for mode in (Qmi.DmsOperatingMode.LOW_POWER, Qmi.DmsOperatingMode.ONLINE):
+                i = Qmi.MessageDmsSetOperatingModeInput()
+                i.set_mode(mode)
+                req(dms, "set_operating_mode", i)
+                if mode == Qmi.DmsOperatingMode.LOW_POWER:
+                    time.sleep(CYCLE_PAUSE_S)
+        except GLib.Error as e:
+            log("radio cycle: %s" % e.message)
+        st["modem_stale"] = True
+
+    def watchdog():
+        st["timer"] = 0
+        if st["service"] == "full" or setting("cellular", "on") == "off":
+            return False
+        if time.monotonic() - st["last_cycle"] >= RETRY_S:
+            cycle_radio()
+        arm_watchdog()                  # look again after another STUCK_S
+        return False
+
+    def set_service(service, tech, operator):
+        was = st["service"]
+        st["service"], st["tech"], st["operator"] = service, tech, operator
+        if service != was:
+            log("service %s%s%s" % (service, " (%s)" % tech if tech else "",
+                                    ", %s" % operator if operator else ""))
+        if service == "full":
+            disarm_watchdog()
+            if st["lost"]:
+                st["lost"] = False
+                for pid in imsd_pids():
+                    log("service back: asking s22-imsd (%d) to offer IMS again" % pid)
+                    os.kill(pid, signal.SIGHUP)
+        else:
+            if was == "full" or not st["lost"]:
+                st["short_since"] = time.monotonic()
+            st["lost"] = True
+            arm_watchdog()
+        write_state(st)
+        if "data" in st:
+            schedule()
+
+    def on_serving(out):
+        try:
+            ss = out.get_serving_system()
+        except GLib.Error:
+            return
+        reg = ss[0]
+        radios = list(ss[4]) if len(ss) > 4 and ss[4] else []
+        tech = radios[0].value_nick if radios else ""
+        operator = ""
+        try:
+            plmn = out.get_current_plmn()
+            operator = plmn[2] or "%03d%02d" % (plmn[0], plmn[1])
+        except (GLib.Error, IndexError, TypeError):
+            pass
+        if reg == Qmi.NasRegistrationState.REGISTERED:
+            service = "full"
+        else:
+            service = "none"
+            try:
+                if out.get_detailed_service_status()[0] == Qmi.NasServiceStatus.LIMITED:
+                    service = "limited"
+            except GLib.Error:
+                pass
+            if service == "none" and radios:
+                service = "limited"     # camped somewhere, not registered
+        set_service(service, tech if service != "none" else "", operator)
+
+    def on_signal(out):
+        b = None
+        try:
+            b = bars(out.get_lte_signal_strength()[2], RSRP_BARS)
+        except GLib.Error:
+            for name in ("get_wcdma_signal_strength", "get_gsm_signal_strength"):
+                try:
+                    b = bars(getattr(out, name)()[0], RSSI_BARS)
+                    break
+                except GLib.Error:
+                    continue
+        if b is not None and b != st["bars"]:
+            st["bars"] = b
+            dbg("signal %d bars" % b)
+            write_state(st)
+
+    # ------------------------------------------------------ mobile data ---
+    from gi.repository import Gio
+    BAM = Qmi.DataEndpointType.BAM_DMUX
+    st["data"] = {}
+    st["wifi_since"] = time.monotonic()     # when WiFi's route last changed
+    st["wifi"] = wifi_has_route()
+    holds = {}                              # fd -> (socket, name, answered)
+    wds = {}                                # family -> WDS client
+    cl = {}                                 # other clients, allocated once
+
+    def once(service):
+        if service not in cl:
+            cl[service] = client(service)
+        return cl[service]
+
+    def data_port():
+        """bam-dmux raw-IP setup of channel DATA_MUX. The modem opens a
+        channel (and the kernel makes its wwan interface) only once its port
+        is open: DATA5_CNTL is channel 0 (s22-imsd's), DATA6_CNTL channel 1"""
+        dpm = once(Qmi.Service.DPM)
+        i = Qmi.MessageDpmOpenPortInput()
+        c = Qmi.MessageDpmOpenPortInputControlPortsElement()
+        c.port_name = "DATA%d_CNTL" % (5 + DATA_MUX)
+        c.endpoint_type, c.interface_number = BAM, DATA_MUX
+        h = Qmi.MessageDpmOpenPortInputHardwareDataPortsElement()
+        h.endpoint_type, h.interface_number = BAM, DATA_MUX
+        h.rx_endpoint_number = h.tx_endpoint_number = DATA_MUX
+        i.set_control_ports([c])
+        i.set_hardware_data_ports([h])
+        try:
+            req(dpm, "open_port", i)
+        except GLib.Error as e:
+            dbg("DPM open port: %s" % e.message)
+        wda = once(Qmi.Service.WDA)
+        i = Qmi.MessageWdaSetDataFormatInput()
+        i.set_link_layer_protocol(Qmi.WdaLinkLayerProtocol.RAW_IP)
+        i.set_uplink_data_aggregation_protocol(Qmi.WdaDataAggregationProtocol.DISABLED)
+        i.set_downlink_data_aggregation_protocol(Qmi.WdaDataAggregationProtocol.DISABLED)
+        i.set_endpoint_info(BAM, DATA_MUX)
+        try:
+            req(wda, "set_data_format", i)
+        except GLib.Error as e:
+            dbg("WDA data format: %s" % e.message)
+
+    def wds_client(fam):
+        if fam not in wds:
+            w = client(Qmi.Service.WDS)
+            i = Qmi.MessageWdsBindMuxDataPortInput()
+            i.set_endpoint_info(BAM, DATA_MUX)
+            i.set_mux_id(DATA_MUX)
+            req(w, "bind_mux_data_port", i)
+            i = Qmi.MessageWdsSetIpFamilyInput()
+            i.set_preference(fam)
+            req(w, "set_ip_family", i)
+            w.connect("packet-service-status", on_packet_status)
+            wds[fam] = w
+        return wds[fam]
+
+    def start_call(fam):
+        """Start one call; (handle, addresses, dns, mtu) or None"""
+        w = wds_client(fam)
+        i = Qmi.MessageWdsStartNetworkInput()
+        i.set_profile_index_3gpp(DATA_PROFILE)
+        i.set_ip_family_preference(fam)
+        try:
+            handle = req(w, "start_network", i, 60).get_packet_data_handle()
+        except GLib.Error as e:
+            log("%s call: %s" % (fam.value_nick, e.message))
+            return None
+        i = Qmi.MessageWdsGetCurrentSettingsInput()
+        i.set_requested_settings(Qmi.WdsRequestedSettings(0xffff))
+        s = req(w, "get_current_settings", i)
+        addrs, dns, mtu = [], [], 0
+        try:
+            mtu = s.get_mtu()
+        except GLib.Error:
+            pass
+        if fam == Qmi.WdsIpFamily.IPV6:
+            a, plen = s.get_ipv6_address()
+            v6 = lambda x: str(ipaddress.IPv6Address(b"".join(int(n).to_bytes(2, "big") for n in x)))
+            addrs.append("%s/%d" % (v6(a), plen))
+            for g in ("get_ipv6_primary_dns_address", "get_ipv6_secondary_dns_address"):
+                try:
+                    dns.append(v6(getattr(s, g)()))
+                except GLib.Error:
+                    pass
+        else:
+            a = str(ipaddress.IPv4Address(s.get_ipv4_address()))
+            try:
+                mask = s.get_ipv4_gateway_subnet_mask()
+                plen = bin(mask).count("1")
+            except GLib.Error:
+                plen = 32
+            addrs.append("%s/%d" % (a, plen))
+            for g in ("get_primary_ipv4_dns_address", "get_secondary_ipv4_dns_address"):
+                try:
+                    dns.append(str(ipaddress.IPv4Address(getattr(s, g)())))
+                except GLib.Error:
+                    pass
+        return handle, addrs, dns, mtu
+
+    def on_packet_status(_w, out):
+        """The network ended a call: drop the link, evaluate brings it back"""
+        try:
+            status = out.get_connection_status()[0]
+        except GLib.Error:
+            return
+        if (status == Qmi.WdsConnectionStatus.DISCONNECTED and
+                st["data"].get("iface") and not st["data"].get("stopping")):
+            log("mobile data: the network ended the call")
+            st["dropped"] = True
+            schedule(5)
+
+    def bound_routes(iface, on):
+        """Sockets bound to the interface find their way out with no default
+        route in the main table: a rule sends them to DATA_TABLE"""
+        for v in ("-4", "-6"):
+            if on:
+                run("ip", v, "route", "replace", "default", "dev", iface, "table", str(DATA_TABLE))
+                run("ip", v, "rule", "add", "pref", str(DATA_TABLE), "oif", iface,
+                    "lookup", str(DATA_TABLE))
+            else:
+                run("ip", v, "rule", "del", "pref", str(DATA_TABLE))
+                run("ip", v, "route", "flush", "table", str(DATA_TABLE))
+
+    def routes(iface, on):
+        if on:
+            run("ip", "route", "replace", "default", "dev", iface, "metric", str(DATA_METRIC))
+            run("ip", "-6", "route", "replace", "default", "dev", iface, "metric", str(DATA_METRIC))
+            conf = "".join("nameserver %s\n" % n for n in st["data"].get("dns", []))
+            subprocess.run(["resolvconf", "-a", iface], input=conf, text=True,
+                           capture_output=True)
+        else:
+            run("ip", "route", "del", "default", "dev", iface)
+            run("ip", "-6", "route", "del", "default", "dev", iface)
+            run("resolvconf", "-d", iface)
+
+    def data_up(mode):
+        d = st["data"]
+        data_port()
+        calls, addrs, dns, mtu = {}, [], [], 0
+        for fam in (Qmi.WdsIpFamily.IPV6, Qmi.WdsIpFamily.IPV4):
+            r = start_call(fam)
+            if r and fam == Qmi.WdsIpFamily.IPV4 and \
+                    ipaddress.ip_interface(r[1][0]).ip in CLAT_NET:
+                dbg("IPv4 is 464XLAT only; IPv6 only")
+                stop_call(fam, r[0])
+                r = None
+            if r:
+                calls[fam] = r[0]
+                addrs += r[1]
+                dns += r[2]
+                mtu = mtu or r[3]
+        if not calls:
+            return False
+        iface = None
+        for _ in range(50):             # the modem opens the channel
+            iface = channel_iface(DATA_MUX)
+            if iface:
+                break
+            time.sleep(0.1)
+        if not iface:
+            log("no interface for bam-dmux channel %d" % DATA_MUX)
+            for fam, h in calls.items():
+                stop_call(fam, h)
+            return False
+        for k, v in (("accept_ra", "0"), ("autoconf", "0")):
+            try:
+                with open("/proc/sys/net/ipv6/conf/%s/%s" % (iface, k), "w") as f:
+                    f.write(v)
+            except OSError:
+                pass
+        run("ip", "addr", "flush", "dev", iface)
+        if mtu:
+            run("ip", "link", "set", iface, "mtu", str(mtu))
+        run("ip", "link", "set", iface, "up")
+        for a in addrs:
+            run("ip", "addr", "add", a, "dev", iface)
+        d.update(iface=iface, calls=calls, dns=dns, mode=mode)
+        bound_routes(iface, True)
+        if mode == "internet":
+            routes(iface, True)
+        log("mobile data up on %s (%s): %s" % (iface, mode, " ".join(addrs)))
+        return True
+
+    def stop_call(fam, handle):
+        i = Qmi.MessageWdsStopNetworkInput()
+        i.set_packet_data_handle(handle)
+        try:
+            req(wds[fam], "stop_network", i)
+        except GLib.Error as e:
+            dbg("stop: %s" % e.message)
+
+    def data_down():
+        d = st["data"]
+        if not d.get("iface"):
+            return
+        d["stopping"] = True
+        routes(d["iface"], False)
+        bound_routes(d["iface"], False)
+        for fam, h in d.get("calls", {}).items():
+            stop_call(fam, h)
+        run("ip", "addr", "flush", "dev", d["iface"])
+        run("ip", "link", "set", d["iface"], "down")
+        log("mobile data down")
+        st["data"] = {}
+
+    def answer_holds():
+        for fd, (conn, name, answered) in list(holds.items()):
+            if answered:
+                continue
+            iface = st["data"].get("iface")
+            msg = "ok %s\n" % iface if iface else "error no mobile data link\n"
+            try:
+                conn.sendall(msg.encode())
+            except OSError:
+                pass
+            holds[fd] = (conn, name, True)
+
+    def evaluate():
+        """Bring the link to what the rules want now (see the top)"""
+        st["eval"] = 0
+        if st.get("busy"):              # QMI waits run the main loop
+            schedule(1)
+            return False
+        st["busy"] = True
+        try:
+            _evaluate()
+        finally:
+            st["busy"] = False
+        return False
+
+    def radio_apply():
+        """The cellular setting: the radio on (online) or off (low power)"""
+        want = setting("cellular", "on") != "off"
+        if st.get("radio") == want:
+            return
+        st["radio"] = want
+        i = Qmi.MessageDmsSetOperatingModeInput()
+        i.set_mode(Qmi.DmsOperatingMode.ONLINE if want else Qmi.DmsOperatingMode.LOW_POWER)
+        try:
+            req(dms, "set_operating_mode", i)
+            log("cellular %s" % ("on" if want else "off: radio in low power"))
+        except GLib.Error as e:
+            log("cellular %s: %s" % ("on" if want else "off", e.message))
+        st["modem_stale"] = True
+        if want:
+            st["short_since"] = time.monotonic()
+        else:
+            disarm_watchdog()
+
+        def reread():                   # the mode reads right once settled
+            st["modem_stale"] = True
+            schedule()
+            return False
+        GLib.timeout_add_seconds(3, reread)
+
+    def modem_info():
+        """Operating mode and the internet profile, for Settings (no radio)"""
+        st["modem_stale"] = False
+        try:
+            st["modem"] = req(dms, "get_operating_mode", None).get_mode().value_nick
+        except GLib.Error as e:
+            dbg("operating mode: %s" % e.message)
+        try:
+            i = Qmi.MessageWdsGetProfileSettingsInput()
+            i.set_profile_id(getattr(Qmi.WdsProfileType, "3GPP"), DATA_PROFILE)
+            out = req(once(Qmi.Service.WDS), "get_profile_settings", i)
+            st["apn"] = out.get_apn_name()
+            st["pdp"] = out.get_pdp_type().value_nick
+        except GLib.Error as e:
+            dbg("profile %d: %s" % (DATA_PROFILE, e.message))
+
+    def _evaluate():
+        radio_apply()
+        if st.get("modem_stale", True):
+            modem_info()
+        if st.pop("dropped", False) and st["data"].get("iface"):
+            st["data"]["calls"] = {}
+            data_down()
+        now = time.monotonic()
+        wifi = wifi_has_route()
+        if wifi != st["wifi"]:
+            st["wifi"], st["wifi_since"] = wifi, now
+        settled = now - st["wifi_since"] >= SETTLE_S
+        full = st["service"] == "full"
+        internet = (setting("mobile_data", "off") == "on" and full and
+                    not wifi and settled)
+        keep_internet = st["data"].get("mode") == "internet" and not (wifi and settled)
+        want_route = internet or (keep_internet and full and
+                                  setting("mobile_data", "off") == "on")
+        want_link = want_route or (full and any(h[1] for h in holds.values()))
+        d = st["data"]
+        if want_link and not d.get("iface"):
+            if not data_up("internet" if want_route else "hold"):
+                log("mobile data: bring-up failed")
+        elif d.get("iface"):
+            if not want_link:
+                data_down()
+            elif want_route and d["mode"] != "internet":
+                d["mode"] = "internet"
+                routes(d["iface"], True)
+                log("mobile data: now the default route (WiFi gone)")
+            elif not want_route and d["mode"] == "internet":
+                d["mode"] = "hold"
+                routes(d["iface"], False)
+                log("mobile data: holds only (WiFi back)")
+        answer_holds()
+        write_state(st)
+        if not settled:                 # look again once WiFi has settled
+            schedule(SETTLE_S - (now - st["wifi_since"]) + 0.5)
+
+    def schedule(delay=0.5):
+        if not st.get("eval"):
+            st["eval"] = GLib.timeout_add(int(delay * 1000), evaluate)
+
+    # Routes and links change: rtnetlink, no polling
+    nl = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+    nl.bind((0, 0x1 | 0x40 | 0x400))   # RTMGRP_LINK, IPV4_ROUTE, IPV6_ROUTE
+    nl.setblocking(False)
+
+    def on_nl(*_):
+        try:
+            while nl.recv(65536):
+                pass
+        except BlockingIOError:
+            pass
+        schedule()
+        return True
+    GLib.io_add_watch(nl.fileno(), GLib.IO_IN, on_nl)
+
+    # The mobile_data setting
+    mon = Gio.File.new_for_path(SETTINGS).monitor_file(Gio.FileMonitorFlags.NONE, None)
+    mon.connect("changed", lambda *_: schedule())
+    st["settings_monitor"] = mon
+
+    # Holds
+    try:
+        os.unlink(CTL)
+    except OSError:
+        pass
+    os.makedirs(STATE_DIR, exist_ok=True)
+    ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ctl.bind(CTL)
+    ctl.listen(8)
+    try:
+        import grp
+        os.chown(CTL, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    os.chmod(CTL, 0o660)
+
+    def on_hold(fd, cond):
+        conn, name, _ = holds[fd]
+        try:
+            data = conn.recv(256) if cond & GLib.IO_IN else b""
+        except OSError:
+            data = b""
+        if data:
+            line = data.decode("utf-8", "replace").strip()
+            if line.startswith("hold"):
+                holds[fd] = (conn, line[4:].strip() or "anonymous", False)
+                log("hold by %s" % holds[fd][1])
+                schedule(0.1)
+            return True
+        if name:
+            log("hold by %s released" % name)
+        del holds[fd]
+        conn.close()
+        schedule()
+        return False
+
+    def on_ctl(*_):
+        conn, _ = ctl.accept()
+        holds[conn.fileno()] = (conn, None, True)    # not a hold until it asks
+        GLib.io_add_watch(conn.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, on_hold)
+        return True
+    GLib.io_add_watch(ctl.fileno(), GLib.IO_IN, on_ctl)
+
+    # Signal reports follow the lid: off while it is closed (each one woke
+    # the suspended phone, every few seconds at a weak signal); a reading
+    # after each resume and when it opens keeps the bars current
+    def lid_closed():
+        try:
+            with open(SLEEP_DIR + "/lid") as f:
+                return f.read().strip() == "closed"
+        except OSError:
+            return False
+
+    reports = {"on": None}
+
+    def read_signal():
+        try:
+            on_signal(req(nas, "get_signal_info", None))
+        except GLib.Error as e:
+            dbg("signal info: %s" % e.message)
+
+    def follow_lid():
+        on = not lid_closed()
+        if on == reports["on"]:
+            return
+        i = Qmi.MessageNasRegisterIndicationsInput()
+        i.set_serving_system_events(True)
+        i.set_signal_info(on)
+        try:
+            req(nas, "register_indications", i)
+            reports["on"] = on
+            dbg("signal reports %s" % ("on" if on else "off (lid closed)"))
+        except GLib.Error as e:
+            log("register indications: %s" % e.message)
+        if on:
+            read_signal()
+
+    def on_sleep_dir(_m, f, other, ev):
+        if ev == Gio.FileMonitorEvent.RENAMED and other is not None:
+            f = other               # lid.new -> lid: the new name
+        elif ev not in (Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+                        Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.MOVED_IN):
+            return
+        name = f.get_basename()
+        if name == "lid":
+            follow_lid()
+        elif name == "resumed":
+            read_signal()
+
+    os.makedirs(SLEEP_DIR, exist_ok=True)
+    sleep_mon = Gio.File.new_for_path(SLEEP_DIR).monitor_directory(
+        Gio.FileMonitorFlags.WATCH_MOVES, None)
+    sleep_mon.connect("changed", on_sleep_dir)
+    follow_lid()
+    c = Qmi.MessageNasConfigSignalInfoInput()
+    c.set_rsrp_threshold(RSRP_BARS)
+    c.set_rssi_threshold(RSSI_BARS)
+    try:
+        req(nas, "config_signal_info", c)
+    except GLib.Error as e:
+        log("signal thresholds: %s" % e.message)
+
+    nas.connect("serving-system", lambda _c, out: on_serving(out))
+    nas.connect("signal-info", lambda _c, out: on_signal(out))
+    try:
+        on_serving(req(nas, "get_serving_system", None))
+    except GLib.Error as e:
+        log("serving system: %s" % e.message)
+    read_signal()
+    schedule()
+    log("ready")
+
+    loop = GLib.MainLoop()
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_signal = GLib.unix_signal_add
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: loop.quit() or False)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: loop.quit() or False)
+    dev.connect("device-removed", lambda *_: (log("modem went away; exiting"), loop.quit()))
+    loop.run()
+    data_down()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

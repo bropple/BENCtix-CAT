@@ -1,0 +1,47 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Mepo, the OpenStreetMap viewer, for the keypad phone (D080): built with the
+# Zig release it needs (0.14; the distribution has a newer one), with
+# benctix.patch (the D-pad, OK and # as keys, pins that move, a user agent
+# naming us), s22-maps, which starts it with the keypad's keys and the GPS
+# position, and s22-maps-search (#, D081).
+
+pkgname=mepo
+pkgver=1.3.4
+pkgrel=5
+_zig=0.14.1
+pkgdesc="Fast, simple and hackable OpenStreetMap viewer (BENCtix-CAT keypad build, with s22-maps)"
+arch=(aarch64)
+url="https://sr.ht/~mil/mepo"
+license=(GPL-3.0-or-later)
+depends=(sdl2-compat sdl2_gfx sdl2_image sdl2_ttf curl python s22-gnssd 's22-gui>=0.83')
+options=(!strip)
+source=("mepo-$pkgver.tar.gz::https://git.sr.ht/~mil/mepo/archive/$pkgver.tar.gz"
+	"https://ziglang.org/download/$_zig/zig-aarch64-linux-$_zig.tar.xz"
+	benctix.patch s22-maps s22-maps-search maps.app 17-maps.txt)
+sha256sums=(6f0f38fd58234b4de33e145d1660223be1d684dc33fea3dccf651281751ce286
+	f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b
+	SKIP SKIP SKIP SKIP SKIP)
+
+prepare() {
+	cd "mepo-$pkgver"
+	patch -p1 < ../benctix.patch
+}
+
+build() {
+	cd "mepo-$pkgver"
+	"$srcdir/zig-aarch64-linux-$_zig/zig" build -Doptimize=ReleaseSafe \
+		--cache-dir "$srcdir/zig-cache" --global-cache-dir "$srcdir/zig-global"
+}
+
+package() {
+	cd "mepo-$pkgver"
+	install -Dm755 zig-out/bin/mepo "$pkgdir/usr/bin/mepo"
+	for f in zig-out/bin/mepo_*.sh; do
+		install -Dm755 "$f" "$pkgdir/usr/bin/${f##*/}"
+	done
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/mepo/LICENSE"
+	install -Dm755 ../s22-maps "$pkgdir/usr/bin/s22-maps"
+	install -Dm755 ../s22-maps-search "$pkgdir/usr/bin/s22-maps-search"
+	install -Dm644 ../maps.app "$pkgdir/usr/share/s22/apps/maps.app"
+	install -Dm644 ../17-maps.txt "$pkgdir/usr/share/s22/help/17-maps.txt"
+}

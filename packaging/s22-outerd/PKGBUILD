@@ -1,0 +1,27 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Status screen on the outer display (D023); the OpenRC service is in
+# files/init.d. Font: the Linux kernel's 8x16 console font (GPL-2.0) for
+# ASCII; the rest by FreeType from the fonts fontconfig finds (D068).
+
+pkgname=s22-outerd
+pkgver=0.21
+pkgrel=1
+pkgdesc="Cat S22 Flip: status screen on the outer display"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(glibc util-linux freetype2 fontconfig noto-fonts noto-fonts-cjk)
+optdepends=("wireplumber: volume keys set the volume"
+            "playerctl: long volume presses skip tracks")
+backup=(etc/s22-outerd.d/media)
+source=(s22-outerd.c fonts.h media)
+sha256sums=(SKIP SKIP SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $(pkg-config --cflags freetype2 fontconfig) $LDFLAGS \
+		-o s22-outerd s22-outerd.c $(pkg-config --libs freetype2 fontconfig)
+}
+
+package() {
+	install -Dm755 s22-outerd "$pkgdir/usr/bin/s22-outerd"
+	install -Dm755 media "$pkgdir/etc/s22-outerd.d/media"
+}

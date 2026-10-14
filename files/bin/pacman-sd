@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# pacman-sd: pacman for programs on the SD card (D046).
+#
+# The transaction runs in a bubblewrap sandbox where the card's layers
+# (ROOT/layers: usr, etc, var) are writable overlays on the phone's /usr,
+# /etc and /var: pacman installs to a normal-looking /, install scripts
+# and hooks run with the phone's shell and tools, and everything they write
+# lands on the card. pacman's database for the card is its own (ROOT/db),
+# where every package the phone has (and all it provides) counts as
+# installed: only what is new goes to the card, a package the phone has is
+# refused, and pacman will not overwrite a phone file it does not own. The
+# phone's repositories, keys and synced databases are shared; downloads
+# are kept on the card (ROOT/cache).
+#
+# Afterwards every program the card has gets a command in ROOT/bin (on
+# PATH, after the phone's, /etc/profile.d/pacman-sd.sh), and every desktop
+# application a tile on the home screen (ROOT/apps, read by the launcher);
+# both start it through sd-run, which lays the card's layers under the
+# phone's, so the phone's files always win.
+#
+#   pacman-sd -S PACKAGE...     install on the card
+#   pacman-sd -Syu              upgrade the card's packages (after the phone's)
+#   pacman-sd -R PACKAGE...     remove from the card
+#   pacman-sd -Q...             what the card has (any pacman query)
+set -euo pipefail
+
+ROOT=${PACMAN_SD_ROOT:-/home/.pacman-sd}
+DB=$ROOT/db
+BIN=$ROOT/bin
+APPS=$ROOT/apps
+LAYERS=(usr etc var)
+
+die() { echo "pacman-sd: $*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || exec sudo -- "$0" "$@"
+[ $# -ge 1 ] || die "usage: pacman-sd -S PACKAGE... | -Syu | -R PACKAGE... | -Q..."
+mountpoint -q /home || die "the SD card is not mounted at /home"
+
+mkdir -p "$DB" "$BIN" "$APPS" "$ROOT/cache"
+for l in "${LAYERS[@]}"; do
+	mkdir -p "$ROOT/layers/$l" "$ROOT/work/$l"
+done
+chmod 755 "$ROOT" "$ROOT/layers" "$BIN" "$APPS"
+# The phone's synced databases, not a second copy of them
+if [ ! -e "$DB/sync" ]; then
+	ln -s /var/lib/pacman/sync "$DB/sync"
+elif [ ! -L "$DB/sync" ]; then
+	die "$DB/sync should be a link to /var/lib/pacman/sync"
+fi
+
+op=$1
+case "$op" in
+-S* | --sync | -R* | --remove | -U* | --upgrade) changes=1 ;;
+-Q* | --query | -F* | --files | -T* | --deptest) changes=0 ;;
+*) die "$op: not for the card (use the phone's pacman)" ;;
+esac
+
+args=(--root / --dbpath "$DB" --config /etc/pacman.conf
+      --cachedir "$ROOT/cache" --gpgdir /etc/pacman.d/gnupg)
+
+if [ "$changes" = 0 ]; then
+	exec pacman "${args[@]}" "$@"
+fi
+
+# A package the phone has already stays the phone's
+if [[ ( "$op" == -S* && "$op" != *[uyc]* ) || "$op" == --sync ]]; then
+	for t in "${@:2}"; do
+		[[ "$t" == -* ]] && continue
+		if pacman -Qq "$t" >/dev/null 2>&1; then
+			die "$t is on the phone already; nothing to put on the card"
+		fi
+	done
+fi
+
+# Everything the phone has, as installed: its packages and what they
+# provide (sh, libfoo.so=1-64, ...)
+assume=()
+while read -r name ver; do
+	assume+=(--assume-installed "$name=$ver")
+done < <(pacman -Q)
+while read -r p; do
+	[ -n "$p" ] && assume+=(--assume-installed "$p")
+done < <(awk '/^%PROVIDES%$/ { f = 1; next } /^%/ { f = 0 } f && NF' \
+	/var/lib/pacman/local/*/desc | sort -u)
+
+# What the phone runs without on purpose (config.sh: SYSTEMD_PKGS,
+# SWAP_REMOVE_PKGS; elogind and OpenRC in their place): packages that ask
+# for these get the phone's own, never these on the card. At the
+# repositories' versions, with all they provide.
+for p in systemd systemd-libs systemd-sysvcompat systemd-resolvconf mkinitcpio netctl \
+	 dbus-units dbus-broker dbus-broker-units cryptsetup device-mapper; do
+	info=$(pacman -Si "$p" 2>/dev/null) || continue
+	ver=$(sed -n 's/^Version *: //p' <<<"$info" | head -n 1)
+	assume+=(--assume-installed "$p=$ver")
+	for prov in $(sed -n 's/^Provides *: //p' <<<"$info" | head -n 1); do
+		[ "$prov" = None ] || assume+=(--assume-installed "$prov")
+	done
+done
+
+# The sandbox: the card's layers written over the phone's
+sandbox=(--dev-bind / /)
+for l in "${LAYERS[@]}"; do
+	sandbox+=(--overlay-src "/$l" --overlay "$ROOT/layers/$l" "$ROOT/work/$l" "/$l")
+done
+bwrap "${sandbox[@]}" -- pacman "${args[@]}" "$@" "${assume[@]}"
+
+# The library cache a hook may have left on the card would hide the phone's
+# own once the phone upgrades: the libraries are found by their paths
+rm -f -- "$ROOT/layers/etc/ld.so.cache"
+
+# A command for every program on the card, run through sd-run; the
+# phone's own commands keep their names
+{ grep -l '^# pacman-sd wrapper' "$BIN"/* 2>/dev/null || true; } |
+	while read -r w; do rm -f -- "$w"; done
+n=0
+for f in "$ROOT"/layers/usr/bin/*; do
+	[ -f "$f" ] && [ -x "$f" ] || continue
+	name=${f##*/}
+	[ -e "/usr/bin/$name" ] && continue
+	printf '#!/bin/sh\n# pacman-sd wrapper: %s on the SD card\nexec /usr/local/bin/sd-run /usr/bin/%s "$@"\n' \
+		"$name" "$name" > "$BIN/$name"
+	chmod 755 "$BIN/$name"
+	n=$((n + 1))
+done
+
+# A home screen tile for every desktop application on the card. Our own
+# entries may say where and how (X-S22-Folder, X-S22-Icon, X-S22-Color),
+# and stand in for a package's own entry (X-S22-Replaces=its file name)
+{ grep -l '^# pacman-sd tile' "$APPS"/*.app 2>/dev/null || true; } |
+	while read -r a; do rm -f -- "$a"; done
+replaced=$(sed -n 's/^X-S22-Replaces=//p' "$ROOT"/layers/usr/share/applications/*.desktop 2>/dev/null || true)
+t=0
+for d in "$ROOT"/layers/usr/share/applications/*.desktop; do
+	[ -f "$d" ] || continue
+	printf '%s\n' "$replaced" | grep -qxF "${d##*/}" && continue
+	entry() { sed -n '/^\[Desktop Entry\]/,/^\[/p' "$d" | sed -n "s/^$1=//p" | head -n 1; }
+	[ "$(entry Type)" = Application ] || continue
+	[ "$(entry NoDisplay)" = true ] && continue
+	[ "$(entry Terminal)" = true ] && continue
+	name=$(entry Name)
+	exec_=$(entry Exec | sed 's/ *%[fFuUdDnNickvm]//g')
+	[ -n "$name" ] && [ -n "$exec_" ] || continue
+	id=$(entry StartupWMClass)
+	base=${d##*/}
+	[ -n "$id" ] || id=${base%.desktop}
+	# A colour from the name, so tiles differ
+	hue=$(printf '%s' "$name" | cksum | cut -d' ' -f1)
+	colors=("#6d4c41" "#00838f" "#5e35b1" "#ad1457" "#2e7d32" "#ef6c00" "#283593" "#00695c")
+	color=$(entry X-S22-Color)
+	{
+		echo "# pacman-sd tile: $base on the SD card"
+		echo "Name=$name"
+		echo "Exec=/usr/local/bin/sd-run $exec_"
+		echo "Id=$id"
+		echo "Color=${color:-${colors[hue % 8]}}"
+		echo "Order=200"
+		[ -z "$(entry X-S22-Icon)" ] || echo "Icon=$(entry X-S22-Icon)"
+		[ -z "$(entry X-S22-Folder)" ] || echo "Folder=$(entry X-S22-Folder)"
+	} > "$APPS/${base%.desktop}.app"
+	t=$((t + 1))
+done
+echo "pacman-sd: $n program(s) and $t app(s) on the card"

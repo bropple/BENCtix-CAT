@@ -1,0 +1,22 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The web browser (D050): WebKitGTK 6.0 in a GTK4 window, keypad and touch,
+# EasyList ad blocking.
+
+pkgname=s22-browser
+pkgver=0.7
+pkgrel=1
+pkgdesc="Cat S22 Flip: web browser on WebKitGTK, with ad blocking"
+arch=(aarch64)
+license=(MIT)
+depends=(s22-standin webkitgtk-6.0 gtk4 glib2 python s22-gui s22-notify ttf-dejavu)
+makedepends=(pkgconf)
+source=(Makefile s22-browser.c s22-browser s22-browser-filters browser.app youtube.js)
+sha256sums=(SKIP SKIP SKIP SKIP SKIP SKIP)
+
+build() {
+	make
+}
+
+package() {
+	make DESTDIR="$pkgdir" install
+}

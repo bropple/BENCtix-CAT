@@ -1,0 +1,28 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# tqftpserv serves the modem's files over QRTR TFTP, as stock's tftp_server
+# does: its MCFG configs (modem_pr, read only, next to the modem firmware)
+# and a small read-write area in /var/lib/tqftpserv (D022). The OpenRC
+# service is in files/init.d.
+
+pkgname=tqftpserv
+pkgver=1.1.1
+pkgrel=1
+pkgdesc="Qualcomm TFTP over QRTR server for the modem"
+arch=(aarch64)
+url="https://github.com/linux-msm/tqftpserv"
+license=(BSD-3-Clause)
+depends=(qrtr zstd)
+makedepends=(git)
+source=("git+https://github.com/linux-msm/tqftpserv.git#commit=c2559a26098f6d2b36a946ef0b6ad02223264c3e")
+sha256sums=(SKIP)
+
+build() {
+	cd tqftpserv
+	${CC:-gcc} $CFLAGS -DHAVE_ZSTD -o tqftpserv \
+		tqftpserv.c translate.c zstd-decompress.c $LDFLAGS -lqrtr -lzstd
+}
+
+package() {
+	install -Dm755 tqftpserv/tqftpserv "$pkgdir/usr/bin/tqftpserv"
+	install -Dm644 tqftpserv/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

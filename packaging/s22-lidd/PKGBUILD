@@ -1,0 +1,28 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The main display follows the lid (off when closed); hooks in /etc/s22-lidd.d;
+# s22-sleepd suspends the phone while the lid is closed (D070).
+
+pkgname=s22-lidd
+pkgver=0.13
+pkgrel=1
+pkgdesc="Cat S22 Flip: main display off and suspend while the lid is closed, plus lid hooks"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(glibc bash)
+optdepends=("iw: WiFi power save follows the lid, WiFi stays connected through a suspend and catches up as the lid opens"
+            "bluez-utils: keep power save off while a Bluetooth audio sink is connected")
+backup=(etc/s22-lidd.d/10-wifi-powersave)
+source=(s22-lidd.c 10-wifi-powersave 20-sleep 30-wifi-rejoin s22-sleepd)
+sha256sums=(SKIP SKIP SKIP SKIP SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-lidd s22-lidd.c
+}
+
+package() {
+	install -Dm755 s22-lidd "$pkgdir/usr/bin/s22-lidd"
+	install -Dm755 10-wifi-powersave "$pkgdir/etc/s22-lidd.d/10-wifi-powersave"
+	install -Dm755 20-sleep "$pkgdir/etc/s22-lidd.d/20-sleep"
+	install -Dm755 30-wifi-rejoin "$pkgdir/etc/s22-lidd.d/30-wifi-rejoin"
+	install -Dm755 s22-sleepd "$pkgdir/usr/bin/s22-sleepd"
+}

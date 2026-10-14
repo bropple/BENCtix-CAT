@@ -1,0 +1,15 @@
+#!/bin/sh
+# Called by 00-benctix-cat-refuse-systemd.hook with the matched targets on
+# stdin. Any match means systemd is about to be installed on this OpenRC
+# system: say why and fail, which aborts the transaction (BENCtix D362).
+targets=$(cat | tr '\n' ' ')
+cat >&2 <<MSG
+
+  BENCtix-CAT: refusing to install ${targets:-systemd}.
+  This system is OpenRC + elogind; libsystemd does not belong here. Something
+  in this transaction depends on it, usually an ALARM package built against
+  systemd-logind. Nothing has been installed. Use the Artix build of that
+  package (see BENCtix's overlay), or leave it out.
+
+MSG
+exit 1

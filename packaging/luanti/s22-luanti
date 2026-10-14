@@ -1,0 +1,13 @@
+#!/bin/sh
+# s22-luanti: Luanti (Minetest) on the S22 Flip. The window's app ID puts
+# the keypad in game mode (s22-t9d: Recents switches it to typing, for
+# chat), and the first start gets the phone's settings (fullscreen, touch
+# controls, keypad bindings). Games come from the main menu's Content tab.
+dir=$HOME/.minetest
+mkdir -p "$dir"
+[ -f "$dir/minetest.conf" ] || cp /usr/share/s22-luanti/minetest.conf "$dir/minetest.conf"
+export SDL_APP_ID=game-luanti SDL_VIDEO_WAYLAND_WMCLASS=game-luanti
+# Its OpenGL renderer asks for 3.2 (GLSL 1.50), and freedreno has 3.1 on
+# the Adreno 308: told 3.2, it starts, and its shaders build and draw (D064)
+export MESA_GL_VERSION_OVERRIDE=3.2COMPAT MESA_GLSL_VERSION_OVERRIDE=150
+exec /usr/bin/luanti "$@"

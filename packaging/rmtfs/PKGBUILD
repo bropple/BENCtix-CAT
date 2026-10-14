@@ -1,0 +1,24 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# rmtfs serves the modem's EFS. On BENCtix-CAT it runs in directory mode
+# from /var/lib/rmtfs (D007); the OpenRC service is in files/init.d.
+
+pkgname=rmtfs
+pkgver=1.3
+pkgrel=1
+pkgdesc="Qualcomm remote filesystem service for the modem"
+arch=(aarch64)
+url="https://github.com/linux-msm/rmtfs"
+license=(BSD-3-Clause)
+depends=(qrtr libudev)
+makedepends=(git)
+source=("git+https://github.com/linux-msm/rmtfs.git#commit=b30a3eb38f9af283f18dbd3c7755653efc52c094")
+sha256sums=(SKIP)
+
+build() {
+	make -C rmtfs prefix=/usr rmtfs
+}
+
+package() {
+	install -Dm755 rmtfs/rmtfs "$pkgdir/usr/bin/rmtfs"
+	install -Dm644 rmtfs/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

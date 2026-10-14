@@ -1,0 +1,22 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# A stand-in libsystemd.so.0 with the four calls WebKitGTK and Samba make
+# (journal logging, sd_notify), doing nothing; outside the library path,
+# for the programs started with it (D050, D056).
+
+pkgname=s22-standin
+pkgver=0.1
+pkgrel=1
+pkgdesc="Cat S22 Flip: do-nothing libsystemd calls for WebKitGTK and Samba"
+arch=(aarch64)
+license=(MIT)
+source=(standin.c standin.map)
+sha256sums=(SKIP SKIP)
+
+build() {
+	cc $CFLAGS -Wall -shared -fPIC -Wl,-soname,libsystemd.so.0 \
+		-Wl,--version-script=standin.map $LDFLAGS -o libsystemd.so.0 standin.c
+}
+
+package() {
+	install -Dm755 libsystemd.so.0 "$pkgdir/usr/lib/s22-standin/libsystemd.so.0"
+}

@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# TFTP over QRTR for the modem (D022), as stock's tftp_server: at boot the
+# modem reads its MCFG config index (modem_pr/mcfg/..., installed next to the
+# modem firmware) and keeps a scratch file in /var/lib/tqftpserv. Starts
+# before rmtfs, which boots the modem.
+
+description="TFTP over QRTR for the modem"
+
+command=/usr/bin/tqftpserv
+command_background=true
+pidfile=/run/tqftpserv.pid
+output_log=/var/log/tqftpserv.log
+error_log=/var/log/tqftpserv.log
+
+depend() {
+	need localmount
+	before rmtfs
+}
+
+start_pre() {
+	checkpath -d -m 0700 /var/lib/tqftpserv
+}

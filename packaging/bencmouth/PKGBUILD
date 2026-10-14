@@ -1,0 +1,36 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+#
+# BENCmouth, the formant speech synthesizer (bropple/BENCmouth): the bm
+# command with CMUdict compiled in, the library and its header, and the
+# voice files. s22-say speaks with it (D065).
+
+pkgname=bencmouth
+pkgver=0.3.2
+pkgrel=1
+pkgdesc="BENCmouth formant speech synthesizer: bm, libbencmouth and voices"
+arch=(aarch64)
+url="https://github.com/bropple/BENCmouth"
+license=(MIT)
+depends=(glibc)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/bropple/BENCmouth/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=(SKIP)
+
+build() {
+	cd "BENCmouth-$pkgver"
+	# The dictionary (make dict), without live audio: speech goes to a
+	# file or a pipe (s22-play -)
+	make dict
+	make bm OPT="-O2 -DBM_WITH_DICT=1"
+}
+
+package() {
+	cd "BENCmouth-$pkgver"
+	install -Dm755 bm "$pkgdir/usr/bin/bm"
+	install -Dm644 libbencmouth.a "$pkgdir/usr/lib/libbencmouth.a"
+	install -Dm644 include/bencmouth.h "$pkgdir/usr/include/bencmouth.h"
+	install -d "$pkgdir/usr/share/bencmouth/voices"
+	install -m644 voices/*.bmvoice "$pkgdir/usr/share/bencmouth/voices/"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+	install -Dm644 ref/cmudict-LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/cmudict-LICENSE.txt"
+}

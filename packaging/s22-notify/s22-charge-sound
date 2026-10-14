@@ -1,0 +1,31 @@
+#!/bin/sh
+# s22-charge-sound: the charger's sound (D073), run by udev
+# (70-s22-charge.rules) for each change of the charger's power supply.
+# Plugged in: a buzz and a rising doodle-doo; unplugged: a falling one, no
+# buzz. Only a change of "online" counts (the charger also reports charging,
+# full and the like), so the last value is kept in STATE. As notifications:
+# no sound with sounds=off, no buzz with vibrate=off, neither in a call.
+#   s22-charge-sound add|change ONLINE
+STATE=/run/s22-charge-online
+SETTINGS=/var/lib/s22/settings
+SOUNDS=/usr/share/sounds/s22
+
+case "${2:-}" in 0|1) ;; *) exit 0 ;; esac
+exec 9> "$STATE.lock"
+flock 9
+last=$(cat "$STATE" 2>/dev/null)
+echo "$2" > "$STATE"
+# At boot (add) and without a last value it only notes it
+[ "$1" = change ] && [ -n "$last" ] && [ "$last" != "$2" ] || exit 0
+exec 9>&-
+
+setting() { sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tail -n 1; }
+grep -q '^call ' /run/s22-call/state 2>/dev/null && exit 0
+if [ "$2" = 1 ]; then
+	[ "$(setting vibrate)" = off ] || s22-vibrate 120 &
+	sound=$SOUNDS/charging-started.wav
+else
+	sound=$SOUNDS/charging-stopped.wav
+fi
+[ "$(setting sounds)" = off ] || s22-play "$sound"
+wait

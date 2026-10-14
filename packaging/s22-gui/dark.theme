@@ -1,0 +1,9 @@
+# The default: dark grey-blue
+bg=#101418
+fg=#e8eaed
+dim=#9aa0a6
+accent=#4fc3f7
+bar=#1c2228
+sel=#2a3f52
+ok=#81c784
+warn=#5d4037

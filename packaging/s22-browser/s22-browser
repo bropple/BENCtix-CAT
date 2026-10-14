@@ -1,0 +1,12 @@
+#!/bin/sh
+# s22-browser: start the browser (D050). WebKitGTK's processes find the
+# libsystemd stand-in (s22-standin: its journal calls do nothing) on their
+# library path, and nothing else on the system does (D056).
+export LD_LIBRARY_PATH="/usr/lib/s22-standin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# GTK draws the browser's window in software (D077): its GL renderer hung
+# the Adreno 308 (hangcheck, the GPU reset under it). The pages are still
+# drawn on the GPU, by WebKit's web process
+export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+# No screen reader here; no accessibility bus
+export GTK_A11Y="${GTK_A11Y:-none}" NO_AT_BRIDGE=1
+exec /usr/lib/s22-browser/s22-browser-bin "$@"

@@ -1,0 +1,10 @@
+# BENCtix-CAT (D046): the SD card's packages follow the phone's
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Reminding of the SD card's packages (pacman-sd)
+When = PostTransaction
+Exec = /bin/sh -c '[ -n "$(find /home/.pacman-sd/var/lib/pacman/local -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ] && echo "The SD card has packages too: run pacman-sd -Syu" || true'

@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+# Tailscale, always on (D036). Its DNS is left alone (s22-vpnd logs in with
+# --accept-dns=false) so Mullvad's can be the system's.
+
+description="Tailscale node agent"
+
+supervisor=supervise-daemon
+command=/usr/bin/tailscaled
+command_args="--state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=${TAILSCALED_PORT:-41641} ${TAILSCALED_ARGS}"
+# Go keeps freed memory a while; a soft limit and a quicker collector keep
+# it near what tailscaled uses (~100 MB otherwise on this phone)
+supervise_daemon_args="--env GOMEMLIMIT=${TAILSCALED_GOMEMLIMIT:-48MiB} --env GOGC=${TAILSCALED_GOGC:-50}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/tailscaled.log
+error_log=/var/log/tailscaled.log
+
+depend() {
+	use dhcpcd wpa_supplicant
+}
+
+start_pre() {
+	checkpath -d -m 0700 /var/lib/tailscale
+	checkpath -d -m 0755 /run/tailscale
+	modprobe -q tun || true
+}

@@ -1,0 +1,17 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Cellular status for the status bars, and a registration watchdog. The
+# OpenRC service is in files/init.d.
+
+pkgname=s22-celld
+pkgver=0.9
+pkgrel=1
+pkgdesc="Cat S22 Flip: cellular status and a registration watchdog"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject libqmi openresolv iproute2)
+source=(s22-celld)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-celld "$pkgdir/usr/bin/s22-celld"
+}

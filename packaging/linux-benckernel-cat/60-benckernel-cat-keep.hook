@@ -1,0 +1,10 @@
+[Trigger]
+Type = Package
+Operation = Upgrade
+Operation = Remove
+Target = linux-benckernel-cat
+
+[Action]
+Description = Keeping the outgoing BENCkernel-CAT as the previous kernel...
+When = PreTransaction
+Exec = /usr/share/libalpm/scripts/benckernel-cat-update keep

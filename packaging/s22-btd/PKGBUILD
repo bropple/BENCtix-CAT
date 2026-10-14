@@ -1,0 +1,18 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Bluetooth for Settings and the status bars: BlueZ's devices, scanning,
+# pairing (with an agent that only answers pairings started here). The
+# OpenRC service is in files/init.d.
+
+pkgname=s22-btd
+pkgver=0.1
+pkgrel=1
+pkgdesc="Cat S22 Flip: Bluetooth devices, scanning and pairing for Settings"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject bluez)
+source=(s22-btd)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-btd "$pkgdir/usr/bin/s22-btd"
+}

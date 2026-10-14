@@ -1,0 +1,10 @@
+With the lid closed
+- The outer screen lights for a few seconds when the lid closes, when a notification arrives, and at the side or volume key: the time, date, battery, Wi-Fi, Bluetooth and the newest notification, over its wallpaper (Settings, Outer screen; a GIF moves).
+Side key	Wake the outer screen; pressed again, the next notification.
+Side key twice	Play or pause the music (or a video in the browser).
+Side key held	Dismiss the notification shown.
+Side + Volume down	The flashlight on or off.
+Volume	Media volume, 0 to 15 as everywhere else.
+Volume held	Next or previous song.
+- While music or a video plays, the outer screen shows its title and artist under the date (grey when paused).
+- Calls ring as usual; opening the lid answers.

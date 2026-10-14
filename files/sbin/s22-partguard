@@ -1,0 +1,107 @@
+#!/bin/sh
+# s22-partguard: make every eMMC partition read-only except the ones
+# BENCtix-CAT writes (D003). Run as early as possible at boot.
+#
+#   s22-partguard          apply both layers
+#   s22-partguard status   show each partition and the eMMC protection state
+#   s22-partguard plan     show the hardware ranges without applying them
+#
+# Layer 1: every partition outside ALLOW is set read-only (BLKROSET).
+# Layer 2: eMMC power-on write protection (D003, D007) on every 4 MiB
+# write-protect group that holds no byte of an ALLOW partition. The eMMC
+# itself then refuses writes there, even through /dev/mmcblkN, until the
+# next reset; a reboot clears it, so lk2nd's fastboot can still flash.
+# Never "temp" (survives power cycles) and never permanent protection.
+#
+# The eMMC is found by device type, not by name: with a microSD card in,
+# mmcblk0 and mmcblk1 can swap depending on probe order. Partitions are
+# matched by their GPT names.
+#
+# This guards against mistakes and buggy tools. root can undo it with
+# blockdev --setrw; the bootloader region additionally gets eMMC power-on
+# write protection where supported.
+
+# Only / and /boot; rmtfs keeps the modem EFS in files (D007)
+ALLOW="userdata cache"
+
+emmc=
+for d in /sys/class/block/mmcblk[0-9]; do
+	[ "$(cat "$d/device/type" 2>/dev/null)" = MMC ] && emmc=${d##*/} && break
+done
+if [ -z "$emmc" ]; then
+	echo "s22-partguard: no eMMC found" >&2
+	exit 1
+fi
+
+# Hardware ranges: whole write-protect groups that hold no ALLOW byte.
+# Prints "start blocks" lines (512-byte blocks).
+hw_ranges() {
+	grp=$(mmc writeprotect user get "/dev/$emmc" 2>/dev/null |
+		sed -n 's|.*size in blocks/bytes: \([0-9]*\)/.*|\1|p')
+	[ -n "$grp" ] || return 1
+	total=$(cat "/sys/class/block/$emmc/size")
+	ngrp=$(( (total + grp - 1) / grp ))
+	# Mark the groups that hold any writable byte
+	busy=" "
+	for p in /sys/class/block/"$emmc"p*; do
+		name=$(sed -n 's/^PARTNAME=//p' "$p/uevent")
+		case " $ALLOW " in *" $name "*) ;; *) continue ;; esac
+		first=$(cat "$p/start")
+		last=$(( first + $(cat "$p/size") - 1 ))
+		g=$(( first / grp ))
+		while [ $g -le $(( last / grp )) ]; do busy="$busy$g "; g=$((g + 1)); done
+	done
+	# The last group holds the backup GPT, which tools rewrite
+	busy="$busy$(( ngrp - 1 )) "
+	g=0; run=-1
+	while [ $g -le $ngrp ]; do
+		case "$busy" in *" $g "*) free=0 ;; *) free=1 ;; esac
+		[ $g -eq $ngrp ] && free=0
+		if [ $free = 1 ] && [ $run -lt 0 ]; then run=$g; fi
+		if [ $free = 0 ] && [ $run -ge 0 ]; then
+			echo "$(( run * grp )) $(( (g - run) * grp ))"
+			run=-1
+		fi
+		g=$((g + 1))
+	done
+}
+
+if [ "${1:-}" = plan ]; then
+	hw_ranges | while read -r start blocks; do
+		echo "power-on write protect: blocks $start-$(( start + blocks - 1 )) ($(( blocks / 2048 )) MiB)"
+	done
+	exit 0
+fi
+
+status=0
+for p in /sys/class/block/"$emmc"p*; do
+	part=${p##*/}
+	name=$(sed -n 's/^PARTNAME=//p' "$p/uevent")
+	case " $ALLOW " in
+		*" $name "*) mode=rw ;;
+		*) mode=ro ;;
+	esac
+	if [ "${1:-}" = status ]; then
+		printf '%-10s %-16s %s\n' "$part" "$name" \
+			"$( [ "$(cat "$p/ro")" = 1 ] && echo read-only || echo writable)"
+		continue
+	fi
+	[ "$mode" = ro ] || continue
+	blockdev --setro "/dev/$part" || status=1
+done
+
+if [ "${1:-}" = status ]; then
+	mmc writeprotect user get "/dev/$emmc" 2>/dev/null | sed -n 's/^Write Protect Groups/WP groups/p'
+	exit 0
+fi
+
+if command -v mmc >/dev/null; then
+	ranges=$(hw_ranges) || { echo "s22-partguard: cannot read write-protect group size" >&2; exit 1; }
+	echo "$ranges" | while read -r start blocks; do
+		mmc writeprotect user set pwron "$start" "$blocks" "/dev/$emmc" || exit 1
+	done || status=1
+else
+	echo "s22-partguard: mmc-utils missing, hardware protection not applied" >&2
+	status=1
+fi
+exit $status

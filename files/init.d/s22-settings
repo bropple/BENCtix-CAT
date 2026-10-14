@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+# The phone's settings (/var/lib/s22/settings, written by s22-settings and
+# read by the programs that use them): this applies the ones that are
+# hardware state at boot: brightness and the Wi-Fi and Bluetooth radios
+# (the media volume is s22-audio's, the call volume s22-calld's).
+
+description="Apply the phone's settings"
+
+depend() {
+	need localmount
+	before s22-gui wpa_supplicant bluetoothd
+}
+
+get() {
+	sed -n "s/^$1=//p" /var/lib/s22/settings 2>/dev/null | tail -n 1
+}
+
+start() {
+	ebegin "Applying settings"
+	# setgid: files the GUI saves here stay group wheel
+	# The machine ID (D-Bus, GTK): 32 hex digits and a newline, which images
+	# before D047 left out; made here if there is none
+	if [ "$(wc -c < /etc/machine-id 2>/dev/null)" = 32 ]; then
+		echo >> /etc/machine-id
+	fi
+	[ -s /etc/machine-id ] || dbus-uuidgen --ensure=/etc/machine-id
+	checkpath -d -m 2775 -o root:wheel /var/lib/s22
+	checkpath -f -m 0664 -o root:wheel /var/lib/s22/settings
+	local b w bt
+	b=$(get brightness)
+	case "$b" in
+	[0-9]*) [ "$b" -ge 5 ] && echo "$b" > /sys/class/backlight/backlight/brightness ;;
+	esac
+	w=$(get wifi)
+	bt=$(get bluetooth)
+	[ "$w" = off ] && rfkill block wlan
+	[ "$bt" = off ] && rfkill block bluetooth
+	eend 0
+}

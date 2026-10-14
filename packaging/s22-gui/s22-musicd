@@ -1,0 +1,18 @@
+#!/bin/sh
+# s22-musicd: the player behind the Music app (D055). mpv, idle, without
+# video, driven over its JSON IPC socket by s22-music, and over MPRIS (the
+# mpv-mpris plugin) by the outer screen's keys and its now playing. The app
+# starts it once; it keeps playing when the app closes. Its own settings
+# only (--no-config): the system mpv.conf is for video.
+#
+# Loudness (D060): songs differ a lot in loudness and few carry ReplayGain
+# tags, so a dynamic normalizer evens them out as they play: dynaudnorm,
+# frames of 500 ms smoothed over 31 of them (about 15 s, so it follows
+# songs rather than beats), aiming at an RMS of 0.2, peaks kept under 0.95,
+# at most 10x (20 dB) up. About 3% of a core here (loudnorm took 36%).
+sock="${XDG_RUNTIME_DIR:-/run/s22-gui}/s22-music.sock"
+exec mpv --no-config --idle=yes --no-video --no-terminal --force-window=no \
+	--input-ipc-server="$sock" --script=/usr/lib/mpv-mpris/mpris.so \
+	--audio-display=no --ao=pipewire,pulse,alsa --audio-client-name=Music \
+	--gapless-audio=weak --replaygain=album --title=Music \
+	--af='lavfi=[dynaudnorm=f=500:g=31:p=0.95:m=10:r=0.2]'

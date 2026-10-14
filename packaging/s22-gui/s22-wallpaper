@@ -1,0 +1,62 @@
+#!/bin/sh
+# s22-wallpaper: a picture as a wallpaper (D066), for Settings.
+#
+# The picture (anything ffmpeg reads: PNG, JPEG, GIF, WebP, a video) is
+# converted once into a binary PPM in /var/lib/s22 that the screens read
+# without decoding it: wallpaper-home.ppm and wallpaper-lock.ppm, 480x640,
+# its first frame (the launcher, the lock screen, ui_wallpaper()); and
+# wallpaper-outer.ppm, 128x128, every frame at 20 a second, up to 20 s
+# (s22-outerd plays them while the outer screen is lit). Each is cropped to
+# fill the screen; what is transparent is black. The choice is kept in the
+# settings as wallpaper_home, wallpaper_lock or wallpaper_outer (the
+# picture's path, or none).
+#
+#   s22-wallpaper home|lock|outer PICTURE    make it the wallpaper
+#   s22-wallpaper home|lock|outer none       no wallpaper
+#   s22-wallpaper -o FILE home|outer PICTURE converted into FILE, nothing
+#                                            else (Photos' preview)
+set -eu
+DIR=/var/lib/s22
+SETTINGS=$DIR/settings
+
+usage() { echo "usage: s22-wallpaper [-o FILE] home|lock|outer PICTURE|none" >&2; exit 2; }
+preview=
+if [ "${1:-}" = -o ] && [ $# -eq 4 ]; then
+	preview=$2
+	shift 2
+fi
+[ $# -eq 2 ] || usage
+case "$1" in
+home|lock)	size=480:640; frames=1; fps= ;;
+outer)		size=128:128; frames=400; fps=fps=20, ;;
+*)		usage ;;
+esac
+out=${preview:-$DIR/wallpaper-$1.ppm}
+
+# key=value into the settings, as ui_setting_set() writes it
+setting() {
+	tmp=$(mktemp "$SETTINGS.XXXXXX")
+	{ grep -v "^$1=" "$SETTINGS" 2>/dev/null || true; echo "$1=$2"; } > "$tmp"
+	chmod 0664 "$tmp"
+	mv -f "$tmp" "$SETTINGS"
+}
+
+if [ "$2" = none ]; then
+	[ -z "$preview" ] || usage
+	rm -f "$out"
+	setting "wallpaper_$1" none
+	exit 0
+fi
+[ -r "$2" ] || { echo "s22-wallpaper: $2: cannot read it" >&2; exit 1; }
+tmp=$(mktemp "$out.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+w=${size%:*}
+h=${size#*:}
+ffmpeg -v error -nostdin -y -i "$2" -filter_complex \
+	"color=c=black:s=${w}x${h}[b];[0:v]${fps}scale=$size:force_original_aspect_ratio=increase:flags=lanczos,crop=$size,format=rgba[f];[b][f]overlay=shortest=1,format=rgb24" \
+	-frames:v "$frames" -f image2pipe -c:v ppm "$tmp"
+[ -s "$tmp" ] || { echo "s22-wallpaper: $2: no picture in it" >&2; exit 1; }
+chmod 0664 "$tmp"
+mv -f "$tmp" "$out"
+trap - EXIT
+[ -n "$preview" ] || setting "wallpaper_$1" "$2"

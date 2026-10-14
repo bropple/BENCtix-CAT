@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# File sharing (D056): Samba's smbd with BENCtix-CAT's smb.conf. Switched on
+# and off by s22-fileshare (Settings), which adds it to or drops it from
+# the default runlevel. smbd finds the libsystemd stand-in (s22-standin) on
+# its library path: Samba calls sd_notify and the journal, and nothing here
+# answers them.
+
+description="File sharing over SMB (the home folder)"
+command=/usr/bin/smbd
+command_args="--foreground --no-process-group"
+supervisor=supervise-daemon
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+output_log=/var/log/samba/smbd.out
+error_log=/var/log/samba/smbd.out
+supervise_daemon_args="--env LD_LIBRARY_PATH=/usr/lib/s22-standin"
+
+depend() {
+	need localmount
+	after dhcpcd wpa_supplicant s22-usbnet
+}
+
+start_pre() {
+	checkpath -d -m 0755 /var/log/samba /run/samba /var/cache/samba /var/lib/samba
+	checkpath -d -m 0700 /var/lib/samba/private
+}

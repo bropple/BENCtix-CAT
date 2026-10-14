@@ -1,0 +1,16 @@
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 27e39a5..7aa3939 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -623,6 +623,11 @@ void SystemGLFrameBuffer::SetVSync( bool vsync )
+ 
+ void SystemGLFrameBuffer::SwapBuffers()
+ {
++	// The frame is finished before the compositor gets it: on the Cat S22
++	// Flip (freedreno, Adreno 308) a frame handed over while the GPU still
++	// draws it is shown with an older frame's contents (stale frames)
++	static auto finish = (void (*)(void))SDL_GL_GetProcAddress("glFinish");
++	if (finish) finish();
+ 	SDL_GL_SwapWindow(Priv::window);
+ }
+ 

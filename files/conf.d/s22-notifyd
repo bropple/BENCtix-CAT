@@ -1,0 +1,2 @@
+# s22-notifyd options, e.g. -v to log every notification
+NOTIFYD_ARGS=

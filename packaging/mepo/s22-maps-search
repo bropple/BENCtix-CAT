@@ -1,0 +1,272 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-maps-search: search OpenStreetMap from Maps (#), D081.
+
+Mepo runs it (shellpipe_sync) with the map's view in MEPO_* variables and
+carries out the commands it prints. It asks for the words with s22-pick,
+and where (◂ ▸): within 5, 25 or 100 miles of here (the GPS fix, or the
+map's centre without one), in the US, or anywhere; the last words and
+choice come back next time. It asks two OpenStreetMap searches at once,
+over the network: Photon (forgives spelling, ranks by nearness) and
+Nominatim (better at addresses); a distance as a box around here (then the
+circle kept), the US by country code, and places near here first otherwise.
+It lists the results with their distance (nearest first within a distance,
+the searches' own order otherwise), and puts them all
+on the map as pins (group 0, the last search's replaced); the chosen one is
+selected and the map goes to it. Nothing is printed when Back cancels.
+"""
+import json, math, os, subprocess, sys, threading, time, urllib.parse, urllib.request
+
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
+PHOTON = "https://photon.komoot.io/api/"
+USER_AGENT = "s22-maps/0.1 (BENCtix-CAT; Mepo on a Cat S22 Flip)"
+STATE = "/run/s22-gnss/state"
+LAST = os.path.expanduser("~/.cache/mepo/last-search")
+# (what s22-pick shows, miles or None, country codes or None)
+SCOPES = [("Within 5 mi", 5, None), ("Within 25 mi", 25, None),
+          ("Within 100 mi", 100, None), ("In the US", None, "us"),
+          ("Anywhere", None, None)]
+DEFAULT_SCOPE = 1
+
+
+def env_f(name):
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return None
+
+
+def here():
+    """The GPS fix if there is one, otherwise the map's centre; and which"""
+    st = {}
+    try:
+        with open(STATE) as f:
+            for line in f:
+                k, _, v = line.rstrip("\n").partition("=")
+                st[k] = v
+        if st.get("fix") == "gnss":
+            return (float(st["lat"]), float(st["lon"])), "you"
+    except (OSError, KeyError, ValueError):
+        pass
+    lat, lon = env_f("MEPO_CENTER_LAT"), env_f("MEPO_CENTER_LON")
+    return ((lat, lon), "the map") if lat is not None and lon is not None else (None, "")
+
+
+def miles(a, b):
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = (math.sin((la2 - la1) / 2) ** 2 +
+         math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
+    return 3958.8 * 2 * math.asin(math.sqrt(h))
+
+
+def ask(of):
+    """The words and the scope's number, or ("", 0) on Back"""
+    last, scope = "", DEFAULT_SCOPE
+    try:
+        with open(LAST) as f:
+            lines = f.read().split("\n")
+        last = lines[0].strip()
+        scope = int(lines[1])
+    except (OSError, IndexError, ValueError):
+        pass
+    names = [n + (" of " + of if miles and of else "") for n, miles, _ in SCOPES]
+    r = subprocess.run(["s22-pick", "-e", "Search", "-l", "A place, an address, a kind of shop",
+                        "-t", last, "-o", "|".join(names), "-s", str(scope)],
+                       stdout=subprocess.PIPE, text=True)
+    out = r.stdout.split("\n") if r.returncode == 0 else []
+    try:
+        words, scope = out[0].strip(), int(out[1])
+    except (IndexError, ValueError):
+        return "", 0
+    if words:
+        try:
+            os.makedirs(os.path.dirname(LAST), exist_ok=True)
+            with open(LAST, "w") as f:
+                f.write("%s\n%d\n" % (words, scope))
+        except OSError:
+            pass
+    return words, scope
+
+
+def variants(words):
+    """The words, and with "'s" for a final s: Nominatim matches whole words,
+    so "mcdonalds" misses every McDonald's (Wendy's, Fry's, Lowe's...)"""
+    out = [words]
+    if "'" not in words:
+        alt = " ".join(w[:-1] + "'s" if len(w) >= 4 and w.lower().endswith("s")
+                       and not w.lower().endswith("ss") else w for w in words.split())
+        if alt != words:
+            out.append(alt)
+    return out
+
+
+def box(me, radius):
+    """(west, south, east, north) of a square radius miles around me"""
+    dlat = radius / 69.0
+    dlon = radius / (69.0 * max(math.cos(math.radians(me[0])), 0.01))
+    return me[1] - dlon, me[0] - dlat, me[1] + dlon, me[0] + dlat
+
+
+def get(url, params):
+    req = urllib.request.Request(url + "?" + urllib.parse.urlencode(params),
+                                 headers={"User-Agent": USER_AGENT, "Accept-Language": "en"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+def place(kind_id, lat, lon, name, detail):
+    return {"id": kind_id, "lat": float(lat), "lon": float(lon), "name": name,
+            "detail": detail}
+
+
+def nominatim(words, scope, me):
+    """Every spelling's results, one request a second (Nominatim's policy)"""
+    _, radius, countries = SCOPES[scope]
+    # every branch, not one per name (dedupe); 40 is Nominatim's most
+    params = {"format": "jsonv2", "limit": "40", "dedupe": "0"}
+    tl = (env_f("MEPO_TL_LAT"), env_f("MEPO_TL_LON"))
+    br = (env_f("MEPO_BR_LAT"), env_f("MEPO_BR_LON"))
+    if radius and me:           # only inside a box around here
+        w, s_, e, n = box(me, radius)
+        params["viewbox"] = "%f,%f,%f,%f" % (w, n, e, s_)
+        params["bounded"] = "1"
+    elif None not in tl + br:   # nearer the view first; elsewhere too
+        params["viewbox"] = "%f,%f,%f,%f" % (tl[1], tl[0], br[1], br[0])
+    if countries:
+        params["countrycodes"] = countries
+    out = []
+    for i, q in enumerate(variants(words)):
+        if i:
+            time.sleep(1.1)
+        for r in get(NOMINATIM, dict(params, q=q)):
+            try:
+                parts = [p.strip() for p in r.get("display_name", "").split(",")]
+                name = r.get("name") or parts[0]
+                kind = (r.get("type") or "").replace("_", " ")
+                rest = [p for p in parts if p != name][:3]
+                out.append(place("%s%s" % (r.get("osm_type", "?")[:1].upper(), r.get("osm_id")),
+                                 r["lat"], r["lon"], name,
+                                 ", ".join(([kind] if kind and kind != "yes" else []) + rest)))
+            except (KeyError, ValueError):
+                pass
+    return out
+
+
+def photon(words, scope, me):
+    """Photon forgives spelling (mcdonalds, walgrens) and ranks by nearness"""
+    _, radius, countries = SCOPES[scope]
+    params = {"q": words, "limit": "40", "lang": "en"}
+    centre = me or (env_f("MEPO_CENTER_LAT"), env_f("MEPO_CENTER_LON"))
+    if None not in centre:
+        params["lat"], params["lon"] = "%f" % centre[0], "%f" % centre[1]
+    if radius and me:
+        params["bbox"] = "%f,%f,%f,%f" % box(me, radius)
+    else:       # nearness counts less than how well known a place is
+        params["zoom"], params["location_bias_scale"] = "6", "0.6"
+    out = []
+    for f in get(PHOTON, params).get("features", []):
+        try:
+            pr = f["properties"]
+            if countries and pr.get("countrycode", "").lower() not in countries.split(","):
+                continue
+            street = " ".join(x for x in (pr.get("housenumber"), pr.get("street")) if x)
+            name = pr.get("name") or street or pr.get("city", "")
+            kind = (pr.get("osm_value") or "").replace("_", " ")
+            rest = [x for x in (street if street != name else "", pr.get("city"),
+                                pr.get("state")) if x]
+            lon, lat = f["geometry"]["coordinates"][:2]
+            out.append(place("%s%s" % (pr.get("osm_type", "?")[:1].upper(), pr.get("osm_id")),
+                             lat, lon, name,
+                             ", ".join(([kind] if kind and kind != "yes" else []) + rest)))
+        except (KeyError, ValueError, TypeError):
+            pass
+    return out
+
+
+def search(words, scope=len(SCOPES) - 1, me=None):
+    """Photon and Nominatim at once (Nominatim is better at addresses), the
+    results merged; an error only if both failed"""
+    got, errors = {}, []
+
+    def run(name, fn):
+        try:
+            got[name] = fn(words, scope, me)
+        except (OSError, ValueError) as e:
+            errors.append(str(getattr(e, "reason", e)))
+    threads = [threading.Thread(target=run, args=(n, f))
+               for n, f in (("photon", photon), ("nominatim", nominatim))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if not got and errors:
+        raise OSError(errors[0])
+    seen, places = set(), []
+    for p in got.get("photon", []) + got.get("nominatim", []):
+        if p["id"] in seen:
+            continue
+        # One place mapped twice (a point and its building): same name, ~50 m
+        if any(q["name"].lower() == p["name"].lower() and
+               miles((q["lat"], q["lon"]), (p["lat"], p["lon"])) < 0.03 for q in places):
+            continue
+        seen.add(p["id"])
+        places.append(p)
+    return places
+
+
+def main():
+    me, of = here()
+    words, scope = ask(of)
+    if not words:
+        return 0
+    pick = subprocess.Popen(["s22-pick", "-c", words], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, text=True)
+    results, failed = [], None
+    try:
+        results = search(words, scope, me)
+    except (OSError, ValueError) as e:
+        failed = str(getattr(e, "reason", e))
+    radius = SCOPES[scope][1] if me else None
+    places = []
+    for p in results:
+        p["dist"] = miles(me, (p["lat"], p["lon"])) if me else None
+        if radius and p["dist"] is not None and p["dist"] > radius:
+            continue            # in the box's corners, outside the circle
+        places.append(p)
+    if radius:      # nearest first; otherwise the searches' own order (the
+        places.sort(key=lambda p: p["dist"])    # Grand Canyon before a sign shop)
+    try:
+        for p in places:
+            d = "" if p["dist"] is None else ("%.1f mi · " % p["dist"] if p["dist"] < 100
+                                              else "%d mi · " % p["dist"])
+            pick.stdin.write("%s\t%s%s\n" % (p["name"], d, p["detail"]))
+        if failed:
+            pick.stdin.write("The search failed\t%s\n" % failed)
+        pick.stdin.close()
+    except BrokenPipeError:
+        pass
+    out, _ = pick.communicate()
+    if pick.returncode != 0 or not places:
+        return 0
+    try:
+        chosen = places[int(out.strip())]
+    except (ValueError, IndexError):
+        return 0
+    cmds = [{"cmd": "prefset_n", "args": {"pref": "pingroup_0_ordered", "value": 0}},
+            {"cmd": "pin_groupactivate", "args": {"group": 0}},
+            {"cmd": "pin_purge", "args": {}}]
+    for p in places:
+        cmds += [{"cmd": "pin_add", "args": {"group": 0, "handle": p["id"],
+                                             "lat": p["lat"], "lon": p["lon"]}},
+                 {"cmd": "pin_meta", "args": {"group": 0, "handle": p["id"],
+                                              "key": "name", "value": p["name"]}}]
+    cmds += [{"cmd": "pin_activate", "args": {"group": 0, "handle": chosen["id"]}},
+             {"cmd": "center_on_pin", "args": {}}]
+    if (env_f("MEPO_ZOOM") or 0) < 15:
+        cmds.append({"cmd": "prefset_n", "args": {"pref": "zoom", "value": 16}})
+    print(json.dumps(cmds))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

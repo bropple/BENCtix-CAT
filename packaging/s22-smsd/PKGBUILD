@@ -1,0 +1,17 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Incoming text messages -> inbox and notifications, straight over QMI WMS
+# (D025). The OpenRC service is in files/init.d.
+
+pkgname=s22-smsd
+pkgver=0.6
+pkgrel=1
+pkgdesc="Cat S22 Flip: text messages from the modem into the inbox and notifications"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject libqmi s22-notify)
+source=(s22-smsd)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-smsd "$pkgdir/usr/bin/s22-smsd"
+}

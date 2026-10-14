@@ -1,0 +1,25 @@
+#!/bin/sh
+# BENCtix-CAT: reboot into lk2nd's fastboot, no key press needed.
+#
+# Sets the kernel's one-shot "next boot: lk2nd fastboot" switch (a PMIC
+# spare byte the stock bootloader leaves alone, D020), then reboots normally.
+# lk2nd clears the switch when it sees it; so does the kernel at boot.
+#   reboot-lk2nd        set the switch and reboot
+#   reboot-lk2nd -n     set the switch only (reboot later yourself)
+#   reboot-lk2nd -c     clear the switch
+set -eu
+
+attr=$(ls /sys/bus/platform/drivers/qcom-pon/*/lk2nd_fastboot 2>/dev/null | head -n 1)
+[ -n "$attr" ] || { echo "reboot-lk2nd: kernel has no lk2nd_fastboot switch" >&2; exit 1; }
+
+case "${1:-}" in
+-c)	echo 0 > "$attr"; echo "lk2nd fastboot switch cleared"; exit 0 ;;
+-n)	echo 1 > "$attr"; echo "next boot: lk2nd fastboot (reboot when ready, or $0 -c)"; exit 0 ;;
+"")	;;
+*)	echo "usage: reboot-lk2nd [-n | -c]" >&2; exit 2 ;;
+esac
+
+echo 1 > "$attr"
+[ "$(cat "$attr")" = 1 ] || { echo "reboot-lk2nd: switch did not stick" >&2; exit 1; }
+echo "rebooting into lk2nd fastboot"
+exec reboot

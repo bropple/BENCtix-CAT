@@ -1,0 +1,22 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+#
+# Luanti (Minetest) for the Cat S22 Flip, on the SD card (pacman-sd -U,
+# after pacman-sd -S luanti): the phone's launcher and first settings
+# around Arch's own luanti package (D064).
+
+pkgname=luanti-s22
+pkgver=1
+pkgrel=1
+pkgdesc="Luanti with the S22 Flip's keypad controls, in the Games folder"
+arch=(any)
+url="https://www.luanti.org"
+license=(GPL-2.0-only)
+depends=(luanti)
+source=(s22-luanti s22-luanti.desktop minetest.conf)
+sha256sums=(SKIP SKIP SKIP)
+
+package() {
+	install -Dm755 s22-luanti "$pkgdir/usr/bin/s22-luanti"
+	install -Dm644 s22-luanti.desktop "$pkgdir/usr/share/applications/s22-luanti.desktop"
+	install -Dm644 minetest.conf "$pkgdir/usr/share/s22-luanti/minetest.conf"
+}

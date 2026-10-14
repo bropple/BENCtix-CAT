@@ -1,0 +1,19 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Speech (D065): s22-say speaks text sent to its socket with BENCmouth, into
+# the loudspeaker through s22-play. say is the same command. The OpenRC
+# service is in files/init.d.
+
+pkgname=s22-say
+pkgver=0.1
+pkgrel=1
+pkgdesc="Cat S22 Flip: text to speech for the phone's apps (BENCmouth)"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(python bencmouth s22-notify)
+source=(s22-say)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-say "$pkgdir/usr/bin/s22-say"
+	ln -s s22-say "$pkgdir/usr/bin/say"
+}

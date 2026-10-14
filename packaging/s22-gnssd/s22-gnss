@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-gnss: hold GPS from s22-gnssd and print where the phone is.
+
+  s22-gnss            a line per report until interrupted (Ctrl-C)
+  s22-gnss -1         wait for a satellite fix, print it and stop
+  s22-gnss -t SECS    give up after SECS (with -1: exit 1 without a fix)
+  s22-gnss --nmea     the engine's NMEA sentences instead
+  s22-gnss -s         the last state, without starting GPS
+
+The receiver runs only while some client holds it (see s22-gnssd); this one
+releases it on exit. A cold start outdoors takes about half a minute.
+"""
+import getopt, signal, socket, sys, time
+
+CTL = "/run/s22-gnss/ctl"
+STATE = "/run/s22-gnss/state"
+
+
+def line_of(st):
+    if st.get("fix") in ("", "none", None) or not st.get("lat"):
+        return "no fix yet (%s satellites in view)" % (st.get("sats_view") or "0")
+    s = "%s %s %s, ±%s m" % (st["fix"], st["lat"], st["lon"], st.get("acc_m") or "?")
+    if st.get("alt"):
+        s += ", alt %s m" % st["alt"]
+    if st.get("sats_used"):
+        s += ", %s/%s satellites" % (st["sats_used"], st.get("sats_view") or "?")
+    if st.get("speed"):
+        s += ", %s m/s" % st["speed"]
+    return s
+
+
+def good(st):
+    """A satellite fix worth stopping for: the first ones are kilometres off"""
+    try:
+        return st.get("fix") == "gnss" and float(st.get("acc_m") or "inf") <= 50
+    except ValueError:
+        return False
+
+
+def main():
+    once, timeout, nmea, status = False, 0, False, False
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "1t:sh", ["nmea", "help"])
+    except getopt.GetoptError as e:
+        sys.exit("s22-gnss: %s" % e)
+    for o, a in opts:
+        if o == "-1":
+            once = True
+        elif o == "-t":
+            timeout = float(a)
+        elif o == "--nmea":
+            nmea = True
+        elif o == "-s":
+            status = True
+        else:
+            print(__doc__.strip())
+            return 0
+    if status:
+        try:
+            sys.stdout.write(open(STATE).read())
+        except OSError as e:
+            sys.exit("s22-gnss: %s" % e)
+        return 0
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(CTL)
+    except OSError as e:
+        sys.exit("s22-gnss: %s: %s" % (CTL, e))
+    s.sendall(("%s s22-gnss\n" % ("nmea" if nmea else "hold")).encode())
+    end = time.monotonic() + timeout if timeout else None
+    f = s.makefile("r")
+    if f.readline().strip() != "ok":
+        sys.exit("s22-gnss: refused")
+    st = {}
+    while True:
+        if end:
+            left = end - time.monotonic()
+            if left <= 0:
+                return 1 if once else 0
+            s.settimeout(left)
+        try:
+            line = f.readline()
+        except (socket.timeout, TimeoutError):
+            return 1 if once else 0
+        if not line:
+            sys.exit("s22-gnss: s22-gnssd went away")
+        if nmea:
+            sys.stdout.write(line.rstrip("\r\n") + "\n")
+            sys.stdout.flush()
+            continue
+        line = line.rstrip("\n")
+        if line:
+            k, _, v = line.partition("=")
+            st[k] = v
+            continue
+        if once and not good(st):
+            continue
+        print(line_of(st), flush=True)
+        if once:
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

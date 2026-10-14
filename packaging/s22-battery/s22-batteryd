@@ -1,0 +1,363 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-batteryd: battery log and low-battery power-off (D027).
+
+Every INTERVAL seconds (default 300) appends a CSV line to
+LOGDIR/battery-YYYY-MM-DD.csv (default /home/s22-battery, the SD card):
+time, uptime, charger online, status, capacity (%, estimated from voltage
+by the PM8916 voltage-mode gauge), voltage and open-circuit voltage (mV),
+lid open/closed, suspend count, modem power collapses and time asleep,
+and the RPM's XO shutdown (vlow) and VDD minimization (vmin) counts.
+
+Every 60 s while discharging: if the capacity is at or below PERCENT
+(default 5) or the voltage is within 50 mV of the battery's minimum design
+voltage, three checks in a row, it posts a notification, waits 30 s
+(plugging in cancels), syncs and powers off. It does that once: a marker
+file disarms it at the next boot until the battery has been charged back to
+REARM percent (default 20), so a nearly empty battery never reboots in a
+loop.
+
+The PM8916 gauge only measures voltage, and the kernel driver's capacity
+jumps with load (unplugging sags it, plugging in lifts it by the charge
+current times the battery resistance). Like downstream's VM-BMS driver,
+this keeps its own reported capacity on top: while discharging it only
+falls, at most FALL_PM %/min, toward the driver's value; while charging it
+only rises, at most RISE_PM %/min (about 600 mA of real charge), and goes
+to 100 when the charger reports full; a fresh hardware OCV reading (taken
+by the PMIC when the current is low) is a stronger target.
+
+While discharging the target is also our own OCV estimate, and the lower of
+it and the driver's value wins: the driver's OCV moves at most 25 mV per
+measurement, so the drop when the charger is unplugged (100 mV or more) is
+lost and it reports 100% long after a charge. Ours is the highest battery
+voltage of the last OCV_WINDOW_S seconds (the lightest load, so load spikes
+from the camera or the modem do not count) plus LOAD_UV for the idle load,
+looked up in the battery's OCV table. It is kept
+across reboots and published in /run/s22-battery/capacity, used by the
+power-off check and the outer display, and logged next to the driver's.
+
+The driver's voltage only changes when the PMIC's sample FIFO fills, which
+takes longer than a wake with the lid closed (about 7 s every 30 s): it
+stayed at the last value all night. So while discharging the voltage is the
+PMIC ADC's VSYS channel (measured when read; the battery's voltage when no
+charger is in), the driver's only as a fallback. And the driver hands out
+its last hardware OCV again after every resume as if new, though the PMIC
+only measures one after a long sleep: an OCV counts only when it has
+changed (or was taken at this boot).
+
+  s22-batteryd [-v] [-l LOGDIR] [-i INTERVAL] [-p PERCENT] [-r REARM] [-n]
+                                   (-n: log only, never power off)
+"""
+import fcntl, getopt, mmap, os, struct, subprocess, sys, time
+
+PSY = "/sys/class/power_supply"
+BAT = PSY + "/pm8916-bms-vm"
+CHG = PSY + "/pm8916-lbc-chgr"
+CHECK_S = 60
+CONFIRM = 3
+GRACE_S = 30
+MARGIN_UV = 50000
+MARKER = "/var/lib/s22-battery/low-poweroff"
+STATE = "/var/lib/s22-battery/capacity"
+OUT = "/run/s22-battery"
+FALL_PM = 1.0
+RISE_PM = 0.5
+OCV_TABLE = "/proc/device-tree/battery/ocv-capacity-table-0"
+OCV_WINDOW_S = 300
+LOAD_UV = 20000
+IIO = "/sys/bus/iio/devices"
+
+verbose = False
+def log(*a): print("s22-batteryd:", *a, file=sys.stderr, flush=True)
+def dbg(*a):
+    if verbose: log(*a)
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+def num(path, default=-1):
+    try:
+        return int(read(path))
+    except ValueError:
+        return default
+
+# RPM statistics in RPM message RAM (read-only, through /dev/mem)
+RPM_MSG_RAM, MASTER_STATS = 0x00290000, 0x00060000
+def rpm_counts():
+    """(vlow, vmin, modem shutdowns, modem seconds asleep) or Nones"""
+    try:
+        fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+    except OSError:
+        return None, None, None, None
+    try:
+        m = mmap.mmap(fd, 0x10000, mmap.MAP_SHARED, mmap.PROT_READ, offset=RPM_MSG_RAM)
+        off = struct.unpack_from("<I", m, 0x14)[0] & 0xffff
+        vlow = struct.unpack_from("<I", m, off + 4)[0]
+        vmin = struct.unpack_from("<I", m, off + 48 + 4)[0]
+        m.close()
+        m = mmap.mmap(fd, 0x8000, mmap.MAP_SHARED, mmap.PROT_READ, offset=MASTER_STATS)
+        o = 0x150 + 1 * 0x1000                  # master 1: MPSS (modem)
+        mpss = struct.unpack_from("<I", m, o + 4)[0]
+        mpss_s = struct.unpack_from("<Q", m, o + 56 + 16)[0] / 19200000
+        m.close()
+        return vlow, vmin, mpss, mpss_s
+    except (OSError, ValueError, struct.error):
+        return None, None, None, None
+    finally:
+        os.close(fd)
+
+def lid():
+    """open / closed from the input device that reports SW_LID"""
+    for n in sorted(os.listdir("/dev/input")):
+        if not n.startswith("event"):
+            continue
+        try:
+            fd = os.open("/dev/input/" + n, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            bits = bytearray(8)       # EVIOCGBIT(EV_SW): SW_LID is bit 0
+            fcntl.ioctl(fd, (2 << 30) | (8 << 16) | (ord("E") << 8) | 0x25, bits)
+            if bits[0] & 1:
+                state = bytearray(8)  # EVIOCGSW
+                fcntl.ioctl(fd, (2 << 30) | (8 << 16) | (ord("E") << 8) | 0x1b, state)
+                return "closed" if state[0] & 1 else "open"
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+    return ""
+
+def vsys_path():
+    """the PMIC ADC's VSYS input, or None"""
+    try:
+        for d in sorted(os.listdir(IIO)):
+            for n in os.listdir(os.path.join(IIO, d)):
+                if n.endswith("_label") and read(os.path.join(IIO, d, n)) == "VSYS":
+                    return os.path.join(IIO, d, n[:-len("label")] + "input")
+    except OSError:
+        pass
+    return None
+
+VSYS = None
+
+def vbat():
+    """the battery voltage now (uV), or -1: VSYS while discharging (fresh),
+    otherwise the driver's"""
+    if VSYS and discharging():
+        uv = num(VSYS)
+        if uv > 0:
+            return uv
+    return num(BAT + "/voltage_now")
+
+# ---------------------------------------------------------------- gauge
+def ocv_table():
+    """[(uV, %)] from the battery's OCV table in the device tree, ascending"""
+    try:
+        with open(OCV_TABLE, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    v = struct.unpack(">%dI" % (len(raw) // 4), raw)
+    return sorted(zip(v[0::2], v[1::2]))
+
+def ocv2cap(uv, table):
+    if not table:
+        return None
+    if uv <= table[0][0]:
+        return float(table[0][1])
+    for (v0, c0), (v1, c1) in zip(table, table[1:]):
+        if uv <= v1:
+            return c0 + (c1 - c0) * (uv - v0) / (v1 - v0)
+    return float(table[-1][1])
+
+class Gauge:
+    def __init__(self):
+        self.table = ocv_table()
+        self.soc = None
+        self.vbat = []          # (monotonic s, uV) while discharging
+        self.last_ocv = None    # the driver's OCV last seen
+        try:
+            self.soc = min(100.0, max(0.0, float(read(STATE).split()[0])))
+            log("capacity %.1f%% from the last run" % self.soc)
+        except (ValueError, IndexError):
+            pass
+
+    def estimate(self):
+        """capacity from our OCV estimate, or None (see the top)"""
+        now = time.monotonic()
+        uv = vbat()
+        if uv > 0:
+            self.vbat.append((now, uv))
+        self.vbat = [(t, v) for t, v in self.vbat if now - t <= OCV_WINDOW_S]
+        if not self.vbat:
+            return None
+        return ocv2cap(max(v for _, v in self.vbat) + LOAD_UV, self.table)
+
+    def update(self, minutes):
+        drv = num(BAT + "/capacity")
+        ocv = num(BAT + "/voltage_ocv")
+        fresh = ocv > 0 and (ocv != self.last_ocv if self.last_ocv is not None
+                             else float(read("/proc/uptime", "0").split()[0]) < 600)
+        if ocv > 0:
+            self.last_ocv = ocv
+        hw = ocv2cap(ocv, self.table) if fresh else None
+        est = None
+        if discharging():
+            est = self.estimate()
+        else:
+            self.vbat = []      # charging voltages are no OCV
+        if self.soc is None:
+            self.soc = float(hw if hw is not None else max(drv, 0))
+        if not discharging():
+            goal = 100.0 if read(BAT + "/status") == "Full" else max(drv, hw or 0)
+            if goal > self.soc:
+                self.soc += min(goal - self.soc, RISE_PM * minutes)
+        else:
+            goal = hw if hw is not None else drv
+            if hw is None and est is not None and (drv < 0 or est < drv):
+                goal = est
+            if goal < self.soc:
+                self.soc -= min(self.soc - goal, FALL_PM * minutes)
+            elif hw is not None and goal > self.soc + 3:
+                self.soc += min(goal - self.soc, FALL_PM * minutes)
+        self.soc = min(100.0, max(0.0, self.soc))
+        self.publish()
+
+    def percent(self):
+        return int(round(self.soc)) if self.soc is not None else num(BAT + "/capacity")
+
+    def publish(self):
+        try:
+            os.makedirs(OUT, exist_ok=True)
+            for path, text in ((OUT + "/capacity", "%d\n" % self.percent()),
+                               (STATE, "%.2f %d\n" % (self.soc, int(time.time())))):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path + ".new", "w") as f:
+                    f.write(text)
+                os.replace(path + ".new", path)
+        except OSError as e:
+            dbg("publish: %s" % e)
+
+gauge = None
+
+FIELDS = ("time,uptime_s,online,status,capacity,voltage_mv,ocv_mv,lid,"
+          "suspends,modem_sleeps,modem_asleep_s,vlow,vmin,est_capacity,vsys_mv")
+
+def sample():
+    up = float(read("/proc/uptime", "0").split()[0])
+    vlow, vmin, mpss, mpss_s = rpm_counts()
+    ocv = num(BAT + "/voltage_ocv")
+    return [time.strftime("%Y-%m-%dT%H:%M:%S%z"), "%.0f" % up,
+            read(CHG + "/online"), read(BAT + "/status"), read(BAT + "/capacity"),
+            str(num(BAT + "/voltage_now") // 1000), str(ocv // 1000) if ocv > 0 else "",
+            lid(),
+            read("/sys/power/suspend_stats/success"),
+            "" if mpss is None else str(mpss), "" if mpss_s is None else "%.1f" % mpss_s,
+            "" if vlow is None else str(vlow), "" if vmin is None else str(vmin),
+            str(gauge.percent()) if gauge else "",
+            str(num(VSYS) // 1000) if VSYS else ""]
+
+def write_line(logdir, row):
+    path = os.path.join(logdir, "battery-%s.csv" % time.strftime("%Y-%m-%d"))
+    if os.path.exists(path) and read(path).split("\n", 1)[0] != FIELDS:
+        path = path[:-4] + "-2.csv"     # columns changed today
+    new = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new:
+            f.write(FIELDS + "\n")
+        f.write(",".join(row) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+def discharging():
+    return read(CHG + "/online") != "1" and read(BAT + "/status") != "Charging"
+
+def low(percent):
+    cap = gauge.percent()
+    uv = vbat()
+    vmin = num(BAT + "/voltage_min_design")
+    if 0 <= cap <= percent:
+        return "battery at %d%%" % cap
+    if uv > 0 and vmin > 0 and uv <= vmin + MARGIN_UV:
+        return "battery at %.2f V" % (uv / 1e6)
+    return None
+
+def power_off(reason, logdir):
+    log("%s: powering off in %d s unless plugged in" % (reason, GRACE_S))
+    subprocess.run(["s22-notify", "-s", "battery",
+                    "Battery low (%s): powering off in %d s" % (reason, GRACE_S)])
+    for _ in range(GRACE_S):
+        time.sleep(1)
+        if not discharging():
+            log("charger connected; staying on")
+            return
+    try:
+        write_line(logdir, sample() + ["poweroff"])
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+        with open(MARKER, "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + " " + reason + "\n")
+    except OSError as e:
+        log("marker: %s" % e)
+    os.sync()
+    subprocess.run(["poweroff"])
+
+def main():
+    global verbose, gauge, VSYS
+    logdir, interval, percent, rearm, act = "/home/s22-battery", 300, 5, 20, True
+    opts, _ = getopt.getopt(sys.argv[1:], "vl:i:p:r:n")
+    for o, a in opts:
+        if o == "-v": verbose = True
+        elif o == "-l": logdir = a
+        elif o == "-i": interval = max(30, int(a))
+        elif o == "-p": percent = int(a)
+        elif o == "-r": rearm = int(a)
+        elif o == "-n": act = False
+    os.makedirs(logdir, exist_ok=True)
+    log("logging to %s every %d s; power off at %d%%%s"
+        % (logdir, interval, percent, "" if act else " (disabled)"))
+    VSYS = vsys_path()
+    if not VSYS:
+        log("no VSYS on the ADC: the driver's voltage only")
+    gauge = Gauge()
+    gauge.update(0)
+    armed = not os.path.exists(MARKER)
+    if act and not armed:
+        log("powered off for low battery last time: disarmed until charged to %d%%" % rearm)
+    next_log, hits = 0.0, 0
+    last = time.monotonic()
+    while True:
+        now = time.monotonic()
+        gauge.update((now - last) / 60)
+        last = now
+        if now >= next_log:
+            try:
+                write_line(logdir, sample())
+            except OSError as e:
+                log("log: %s" % e)
+            next_log = now + interval
+        if not armed and gauge.percent() >= rearm:
+            try:
+                os.unlink(MARKER)
+            except OSError:
+                pass
+            armed = True
+            log("charged to %d%%: low-battery power-off armed again" % rearm)
+        reason = low(percent) if discharging() else None
+        hits = hits + 1 if reason else 0
+        if reason:
+            dbg("%s (%d/%d)" % (reason, hits, CONFIRM))
+        if act and armed and hits >= CONFIRM:
+            power_off(reason, logdir)
+            hits = 0
+        time.sleep(min(CHECK_S, max(1, next_log - time.monotonic())))
+
+if __name__ == "__main__":
+    sys.exit(main())

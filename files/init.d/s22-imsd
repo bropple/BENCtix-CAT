@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# The AP side of the modem's IMS data connection, by s22-imsd (D026): brings
+# up the IMS PDN when the modem's IMS stack asks. Without it the modem
+# retries forever and never sleeps.
+
+description="IMS data connection for the modem"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-imsd
+command_args="${IMSD_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-imsd.log
+error_log=/var/log/s22-imsd.log
+
+depend() {
+	need rmtfs
+	after tqftpserv s22-smsd
+}

@@ -1,0 +1,43 @@
+#!/bin/sh
+# s22-outerd media hook: the volume keys with the lid closed (D024, D054).
+#   volume-up | volume-down   the media volume, one of the GUI's 15 steps (the
+#                             "volume" setting, as s22-wm's volume keys set it)
+#   next | previous           the track, through MPRIS (playerctl)
+#   play-pause                play or pause, through MPRIS
+# Runs as root; acts in the GUI's session (/run/s22-gui: PipeWire and its
+# D-Bus) as the user who owns it. Prints the new volume for s22-outerd to
+# show, as the GUI counts it ("Level: 8 15"; "Volume: 0.53", a fraction, is
+# understood too). A music player can replace this file to handle the keys
+# itself.
+action=${1:-}
+RUN=/run/s22-gui
+SETTINGS=/var/lib/s22/settings
+
+[ -S "$RUN/pipewire-0" ] || exit 0
+uid=$(stat -c %u "$RUN") && gid=$(stat -c %g "$RUN") || exit 0
+as_user() {	# stderr dropped: wpctl warns about RTKit on every call
+	setpriv --reuid="$uid" --regid="$gid" --init-groups \
+		env XDG_RUNTIME_DIR=$RUN PIPEWIRE_RUNTIME_DIR=$RUN \
+		DBUS_SESSION_BUS_ADDRESS=unix:path=$RUN/bus "$@" 2>/dev/null
+}
+
+case "$action" in
+volume-up|volume-down)
+	v=$(sed -n 's/^volume=//p' "$SETTINGS" 2>/dev/null | tail -n 1)
+	case "$v" in [0-9]|1[0-5]) ;; *) v=15 ;; esac
+	if [ "$action" = volume-up ]; then v=$((v + 1)); else v=$((v - 1)); fi
+	[ "$v" -gt 15 ] && v=15
+	[ "$v" -lt 0 ] && v=0
+	# The settings file, rewritten whole with the one key changed, as the
+	# GUI does, keeping its owner and mode
+	tmp=$(mktemp "$SETTINGS.XXXXXX") && {
+		grep -v '^volume=' "$SETTINGS" 2>/dev/null
+		echo "volume=$v"
+	} > "$tmp" && chown --reference="$SETTINGS" "$tmp" &&
+		chmod --reference="$SETTINGS" "$tmp" && mv -f "$tmp" "$SETTINGS"
+	as_user wpctl set-volume @DEFAULT_AUDIO_SINK@ "$(awk "BEGIN { printf \"%.3f\", $v / 15 }")"
+	echo "Level: $v 15" ;;
+next|previous|play-pause)
+	command -v playerctl >/dev/null && as_user playerctl "$action" ;;
+esac
+exit 0

@@ -1,0 +1,5 @@
+# s22-outerd options, e.g. how long the screen stays lit (ms):
+#   OUTERD_ARGS="-t 15000"
+# Wallpaper: chosen in Settings, Outer screen (s22-wallpaper makes
+# /var/lib/s22/wallpaper-outer.ppm, D066); -w for another file
+OUTERD_ARGS=

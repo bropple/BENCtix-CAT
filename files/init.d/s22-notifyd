@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Notification alerts, s22-notifyd (D024): vibrates for each new notification
+# in /run/s22-notify with the pattern set for its source in
+# /var/lib/s22-notify/vibrate.
+
+description="Notification alerts (vibration)"
+
+command=/usr/bin/s22-notifyd
+command_args="${NOTIFYD_ARGS}"
+command_background=true
+pidfile=/run/s22-notifyd.pid
+output_log=/var/log/s22-notifyd.log
+error_log=/var/log/s22-notifyd.log
+
+depend() {
+	need localmount
+	before s22-outerd
+}

@@ -1,0 +1,3 @@
+# s22-smsd options: -v logs every message, -n leaves the modem's operating
+# mode alone (otherwise it is set online at start)
+SMSD_ARGS=

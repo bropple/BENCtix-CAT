@@ -1,0 +1,13 @@
+Maps
+- OpenStreetMap maps (Mepo), with where you are: GPS runs while Maps is open (the arrow in the status bar), and the first fix centres the map on you. The orange pin is you.
+- Map tiles come over the network and are kept on the SD card, so places you have looked at work offline.
+
+# Keys
+D-pad	Move the map.
+2 4 6 8	Move it further.
+1 / 3	Zoom out / in.
+5, OK	Back to where you are.
+#	Search: type a place, an address or a kind of shop; ◂ ▸ choose where (within 5, 25 or 100 miles of you, in the US, or anywhere). Pick from the results, nearest first; they stay on the map as pins.
+7	Mepo's own key help.
+9	The info bar (zoom, position, downloads).
+0	Tiles from the network on or off (off: only what is cached).

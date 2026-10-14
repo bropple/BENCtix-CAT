@@ -1,0 +1,26 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+#
+# UZDoom for the Cat S22 Flip, on the SD card (pacman-sd -U). Built and
+# staged by tools/build-uzdoom.sh (cross-compiled), which sets UZ_* below.
+# This PKGBUILD only packages that stage and adds the phone's launcher.
+
+pkgname=uzdoom-s22
+pkgver=${UZ_VER:?run tools/build-uzdoom.sh}
+pkgrel=${UZ_PKGREL:?}
+pkgdesc="UZDoom, with the S22 Flip's keypad controls and settings"
+arch=(aarch64)
+url="https://github.com/UZDoom/UZDoom"
+license=(GPL-3.0-or-later)
+depends=(sdl2-compat openal libvpx bzip2 alsa-lib glib2 dbus gcc-libs)
+provides=(uzdoom)
+conflicts=(uzdoom)
+options=(!strip !debug)
+source=(s22-doom s22-doom.desktop uzdoom.ini)
+sha256sums=(SKIP SKIP SKIP)
+
+package() {
+	cp -a "$UZ_STAGE"/. "$pkgdir"/
+	install -Dm755 s22-doom "$pkgdir/usr/bin/s22-doom"
+	install -Dm644 s22-doom.desktop "$pkgdir/usr/share/applications/s22-doom.desktop"
+	install -Dm644 uzdoom.ini "$pkgdir/usr/share/s22-doom/uzdoom.ini"
+}

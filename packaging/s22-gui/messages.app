@@ -1,0 +1,9 @@
+Name=Messages
+Exec=s22-messages
+Id=s22-messages
+Icon=✉
+Color=#1565c0
+Order=20
+Notify=sms
+Handles=sms
+Badge=messages

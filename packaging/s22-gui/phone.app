@@ -1,0 +1,9 @@
+Name=Phone
+Exec=s22-phone
+Id=s22-phone
+Icon=☎
+Color=#2e7d32
+Order=10
+Notify=missed-call
+Handles=tel,call
+Badge=calls

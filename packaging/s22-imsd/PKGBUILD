@@ -1,0 +1,17 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The AP side of the modem's IMS data connection (D026). The OpenRC service
+# is in files/init.d.
+
+pkgname=s22-imsd
+pkgver=0.7
+pkgrel=1
+pkgdesc="Cat S22 Flip: bring up the IMS PDN for the modem's own IMS stack"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject libqmi)
+source=(s22-imsd)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-imsd "$pkgdir/usr/bin/s22-imsd"
+}

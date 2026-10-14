@@ -1,0 +1,10 @@
+# Build logs: local only (they hold host paths and change every build)
+docs/logs/*.log
+packaging/*/pkg/
+packaging/*/src/
+packaging/*/*.pkg.tar.*
+__pycache__/
+packaging/aosp-sounds/*.tar.gz
+packaging/aosp-sounds/*.b64
+# This builder's own settings over config.sh (the timezone, ...)
+config.local.sh

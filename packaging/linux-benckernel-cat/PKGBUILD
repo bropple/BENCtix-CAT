@@ -1,0 +1,32 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+#
+# BENCkernel-CAT: the msm89x7 kernel fork for the Cat S22 Flip, built and
+# staged by tools/build-benckernel-cat.sh, which sets BENCK_* below. This
+# PKGBUILD only packages that stage; it builds nothing itself.
+
+pkgname=linux-benckernel-cat
+pkgver=${BENCK_KVER:?run tools/build-benckernel-cat.sh}
+pkgrel=${BENCK_PKGREL:?}
+pkgdesc="BENCkernel-CAT, the kernel of BENCtix-CAT for the Cat S22 Flip (${BENCK_RELEASE}, ${BENCK_COMMIT})"
+arch=(aarch64)
+url="https://github.com/bropple/linux/tree/s22flip"
+license=(GPL-2.0-only)
+depends=(kmod)
+backup=(etc/benckernel-cat/cmdline)
+options=(!strip !debug)
+install=linux-benckernel-cat.install
+source=(benckernel-cat-update
+        60-benckernel-cat-keep.hook
+        90-benckernel-cat.hook
+        cmdline)
+sha256sums=(SKIP SKIP SKIP SKIP)
+
+package() {
+	cp -a "$BENCK_STAGE"/. "$pkgdir"/
+	install -Dm755 benckernel-cat-update "$pkgdir/usr/share/libalpm/scripts/benckernel-cat-update"
+	install -dm755 "$pkgdir/usr/bin"
+	ln -s ../share/libalpm/scripts/benckernel-cat-update "$pkgdir/usr/bin/benckernel-cat-update"
+	install -Dm644 60-benckernel-cat-keep.hook "$pkgdir/usr/share/libalpm/hooks/60-benckernel-cat-keep.hook"
+	install -Dm644 90-benckernel-cat.hook "$pkgdir/usr/share/libalpm/hooks/90-benckernel-cat.hook"
+	install -Dm644 cmdline "$pkgdir/etc/benckernel-cat/cmdline"
+}

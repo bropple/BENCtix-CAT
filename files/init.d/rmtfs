@@ -1,0 +1,48 @@
+#!/sbin/openrc-run
+# The modem's remote filesystem. The EFS lives in files under /var/lib/rmtfs
+# (D007): seeded once from the eMMC EFS partitions, which are only ever
+# read. rmtfs -s starts the modem when it is ready and stops it on exit.
+
+description="Modem remote filesystem (EFS in /var/lib/rmtfs)"
+
+EFS=/var/lib/rmtfs
+command=/usr/bin/rmtfs
+command_args="-o $EFS ${RMTFS_START_MODEM:+-s} ${RMTFS_ARGS}"
+command_background=true
+pidfile=/run/rmtfs.pid
+output_log=/var/log/rmtfs.log
+error_log=/var/log/rmtfs.log
+
+depend() {
+	need localmount
+	after s22-partguard udev-settle
+}
+
+# rmtfs's file name, then the eMMC partition it is seeded from
+SEED="modem_fs1:modemst1 modem_fs2:modemst2 modem_fsc:fsc modem_fsg:fsg"
+
+seed() {
+	local pair file part dev
+	checkpath -d -m 0700 "$EFS"
+	for pair in $SEED; do
+		file=${pair%%:*} part=${pair#*:}
+		[ -s "$EFS/$file" ] && continue
+		dev=/dev/disk/by-partlabel/$part
+		[ -b "$dev" ] || { eerror "no $part partition to seed $file from"; return 1; }
+		einfo "Seeding $EFS/$file from $part (read only)"
+		dd if="$dev" of="$EFS/$file.new" bs=64k status=none &&
+			chmod 0600 "$EFS/$file.new" && mv "$EFS/$file.new" "$EFS/$file" || return 1
+	done
+}
+
+start_pre() {
+	seed || return 1
+	modprobe -q qcom_q6v5_mss
+	local i
+	for i in $(seq 20); do
+		[ -e /dev/qcom_rmtfs_mem1 ] && return 0
+		sleep 0.5
+	done
+	eerror "/dev/qcom_rmtfs_mem1 did not appear"
+	return 1
+}

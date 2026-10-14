@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Speech, s22-say (D065): speaks what the phone's apps send to
+# /run/s22-say/sock (a caller's name, a text read aloud) with BENCmouth.
+
+description="Text to speech (BENCmouth)"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-say
+command_args="-d"
+respawn_delay=5
+respawn_max=0
+output_log=/var/log/s22-say.log
+error_log=/var/log/s22-say.log
+
+depend() {
+	need localmount
+	before s22-notifyd s22-call
+}

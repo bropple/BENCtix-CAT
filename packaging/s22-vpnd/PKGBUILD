@@ -1,0 +1,18 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The phone's VPNs: Mullvad (WireGuard) on the "mullvad" setting, the
+# Tailscale login, and their state for Settings. The OpenRC services
+# (s22-vpnd, tailscaled) are in files/init.d.
+
+pkgname=s22-vpnd
+pkgver=0.2
+pkgrel=1
+pkgdesc="Cat S22 Flip: Tailscale and Mullvad switch and status"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject tailscale wireguard-tools openresolv iproute2)
+source=(s22-vpnd)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-vpnd "$pkgdir/usr/bin/s22-vpnd"
+}

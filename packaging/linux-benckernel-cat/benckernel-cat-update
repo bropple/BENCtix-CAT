@@ -1,0 +1,138 @@
+#!/bin/bash
+# benckernel-cat-update: keep the previous BENCkernel-CAT, build an
+# initramfs if mkinitcpio is installed (none by default, D008) and write
+# /boot/extlinux/extlinux.conf for lk2nd (D002, D004).
+#
+#   benckernel-cat-update keep     before an upgrade or removal (pacman hook)
+#   benckernel-cat-update update   after an install or upgrade (pacman hook)
+#   benckernel-cat-update default current|previous
+#                                  choose which label lk2nd boots
+#
+# Paths in extlinux.conf are relative to the /boot partition's root, which
+# is how lk2nd reads them.
+set -euo pipefail
+
+BOOT=/boot
+KEEP=$BOOT/previous
+MODKEEP=/var/lib/benckernel-cat/previous-modules
+CMDLINE=/etc/benckernel-cat/cmdline
+CONF=$BOOT/extlinux/extlinux.conf
+STATE=/var/lib/benckernel-cat/default
+
+say() { echo "==> $*"; }
+
+# Releases installed by the package (the module directory's pkgbase file is
+# owned by it), newest last
+owned_releases() {
+	local d
+	for d in /usr/lib/modules/*-BENCkernel-CAT; do
+		[ -f "$d/pkgbase" ] || continue
+		# An if, not &&: an unowned last directory must not fail the loop
+		# (set -e and pipefail would end the script at the caller)
+		if pacman -Qqo "$d/pkgbase" >/dev/null 2>&1; then
+			basename "$d"
+		fi
+	done | sort -V
+}
+
+keep() {
+	local rel tmp
+	rel=$(owned_releases | tail -n1)
+	[ -n "$rel" ] || return 0
+	say "keeping $rel as the previous kernel"
+
+	tmp=$KEEP.new
+	mkdir -p "$tmp/dtbs"
+	cp "$BOOT/Image-$rel.gz" "$tmp/"
+	cp -a "$BOOT/dtbs/$rel" "$tmp/dtbs/"
+	[ -f "$BOOT/initramfs-$rel.img" ] && cp "$BOOT/initramfs-$rel.img" "$tmp/"
+	echo "$rel" > "$tmp/release"
+
+	mkdir -p "$MODKEEP.new"
+	cp -a "/usr/lib/modules/$rel" "$MODKEEP.new/"
+
+	# Swap in the new copies; only one previous kernel is kept
+	[ -e "$KEEP" ] && mv "$KEEP" "$KEEP.old"
+	mv "$tmp" "$KEEP"
+	[ -e "$MODKEEP" ] && mv "$MODKEEP" "$MODKEEP.old"
+	mv "$MODKEEP.new" "$MODKEEP"
+	rm -rf "$KEEP.old" "$MODKEEP.old"
+}
+
+entry() {	# entry LABEL PREFIX RELEASE
+	local dtb
+	dtb=$(cat "/usr/lib/modules/$3/dtb")
+	cat <<-EOF
+
+	label $1
+		kernel $2/Image-$3.gz
+		fdt $2/dtbs/$3/$dtb
+	EOF
+	if [ -f "$BOOT$2/initramfs-$3.img" ]; then
+		printf '\tinitrd %s/initramfs-%s.img\n' "$2" "$3"
+	fi
+	printf '\tappend %s\n' "$(tr '\n' ' ' < "$CMDLINE" | sed 's/ *$//')"
+}
+
+write_conf() {
+	local cur prev def
+	cur=$(owned_releases | tail -n1)
+	[ -n "$cur" ] || return 0
+	prev=$(cat "$KEEP/release" 2>/dev/null || true)
+	[ "$prev" = "$cur" ] && prev=
+	def=$(cat "$STATE" 2>/dev/null || echo current)
+	[ "$def" = previous ] && [ -z "$prev" ] && def=current
+
+	mkdir -p "$BOOT/extlinux"
+	{
+		echo "# Written by benckernel-cat-update; edit $CMDLINE instead."
+		echo "default $def"
+		entry current "" "$cur"
+		[ -n "$prev" ] && entry previous /previous "$prev"
+	} > "$CONF.new"
+	mv "$CONF.new" "$CONF"
+	say "boot entries: current $cur${prev:+, previous $prev}; default $def"
+}
+
+update() {
+	local cur prev
+	cur=$(owned_releases | tail -n1)
+	[ -n "$cur" ] || return 0
+	prev=$(cat "$KEEP/release" 2>/dev/null || true)
+
+	# pacman removed the outgoing package's modules; put the kept copy back
+	if [ -n "$prev" ] && [ "$prev" != "$cur" ] && [ ! -d "/usr/lib/modules/$prev" ] &&
+	   [ -d "$MODKEEP/$prev" ]; then
+		cp -a "$MODKEEP/$prev" /usr/lib/modules/
+	fi
+
+	# Module trees of BENCkernel-CAT releases that are neither current nor
+	# previous, and that no package owns, are copies this script restored
+	# earlier; nothing can boot them any more
+	local d rel
+	for d in /usr/lib/modules/*-BENCkernel-CAT; do
+		[ -d "$d" ] || continue
+		rel=${d##*/}
+		[ "$rel" = "$cur" ] || [ "$rel" = "$prev" ] && continue
+		pacman -Qqo "$d" >/dev/null 2>&1 && continue
+		say "removing the modules of $rel (no longer current or previous)"
+		rm -rf -- "$d"
+	done
+
+	if command -v mkinitcpio >/dev/null; then
+		say "building initramfs for $cur"
+		mkinitcpio -k "$cur" -g "$BOOT/initramfs-$cur.img"
+	fi
+	write_conf
+}
+
+case "${1:-}" in
+	keep) keep ;;
+	update) update ;;
+	default)
+		case "${2:-}" in
+			current|previous) mkdir -p "${STATE%/*}"; echo "$2" > "$STATE"; write_conf ;;
+			*) echo "usage: $0 default current|previous" >&2; exit 2 ;;
+		esac ;;
+	*) echo "usage: $0 keep|update|default current|previous" >&2; exit 2 ;;
+esac

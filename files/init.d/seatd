@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# Seat management for the GUI: s22-wm (as the owner) gets the display and
+# input devices through it. Members of group video may use it.
+
+description="Seat management daemon"
+
+supervisor=supervise-daemon
+command=/usr/bin/seatd
+command_args="-g video"
+output_log=/var/log/seatd.log
+error_log=/var/log/seatd.log
+
+depend() {
+	need localmount
+	after udev
+}

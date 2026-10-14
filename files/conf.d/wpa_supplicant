@@ -1,0 +1,3 @@
+# BENCtix-CAT: the WCN3610 WiFi is wlan0
+wpa_supplicant_if="wlan0"
+wpa_supplicant_args="-D nl80211"

@@ -1,0 +1,2 @@
+# s22-imsd options: -v logs every request from the modem
+IMSD_ARGS=

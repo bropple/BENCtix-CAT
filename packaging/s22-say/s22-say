@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""s22-say: speech for the Cat S22 Flip (D065), with BENCmouth.
+
+The daemon (s22-say -d, the s22-say service) speaks what it is sent on
+SOCK, one thing at a time, in order: bm renders it (the voice tts_voice in
+the settings, default BENCmouth) and s22-play plays it into the loudspeaker
+at the ring and notification volume. A long text goes in sentence-sized
+pieces (bm takes about 1 KB at a time). One line per connection:
+
+    say TEXT      queue TEXT; the answer is "ok"
+    wait TEXT     queue TEXT; the answer is "done" once it has been said,
+                  "stopped" if a stop came first
+    stop          stop speaking and forget the queue; "ok"
+
+The client (any other use) sends one of those:
+
+    s22-say TEXT...        say it (say is the same command)
+    s22-say -w TEXT...     say it, and return when it has been said
+    s22-say -s             stop
+"""
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+
+SOCK_DIR = "/run/s22-say"
+SOCK = SOCK_DIR + "/sock"
+SETTINGS = "/var/lib/s22/settings"
+DEFAULT_VOICE = "BENCmouth"
+CHUNK = 300             # characters per bm run, well under its 1 KB
+QUEUE_MAX = 32
+
+
+def log(msg):
+    print("s22-say: " + msg, file=sys.stderr, flush=True)
+
+
+def setting(key, default):
+    val = default
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    val = line[len(key) + 1:].strip()
+    except OSError:
+        pass
+    return val
+
+
+def pieces(text):
+    """The text in pieces of up to CHUNK characters, split after sentences,
+    else after commas, else between words"""
+    text = " ".join(text.split())
+    out = []
+    while len(text) > CHUNK:
+        head = text[:CHUNK]
+        cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+        if cut < CHUNK // 3:
+            cut = max(head.rfind(", "), head.rfind("; "))
+        if cut < CHUNK // 3:
+            cut = head.rfind(" ")
+        if cut <= 0:
+            cut = CHUNK - 1
+        out.append(text[:cut + 1].strip())
+        text = text[cut + 1:].strip()
+    if text:
+        out.append(text)
+    return out
+
+
+class Speaker:
+    """The queue and the one thing being said"""
+
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.queue = []         # [text, done event, result]
+        self.procs = None
+        self.gen = 0            # bumped by stop()
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def add(self, text):
+        item = [text, threading.Event(), "done"]
+        with self.cv:
+            if len(self.queue) >= QUEUE_MAX:
+                item[2] = "busy"
+                item[1].set()
+                return item
+            self.queue.append(item)
+            self.cv.notify()
+        return item
+
+    def stop(self):
+        with self.cv:
+            self.gen += 1
+            for item in self.queue:
+                item[2] = "stopped"
+                item[1].set()
+            self.queue = []
+            procs = self.procs
+        if procs:
+            for p in procs:
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)
+                except OSError:
+                    pass
+
+    def say_piece(self, text, voice):
+        # A leading space: text that starts with "-" is not an option
+        bm = subprocess.Popen(["bm", "-v", voice, "-o", "-", " " + text],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+        play = subprocess.Popen(["s22-play", "-"], stdin=bm.stdout,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+        bm.stdout.close()
+        with self.cv:
+            self.procs = (bm, play)
+        play.wait()
+        bm.wait()
+        with self.cv:
+            self.procs = None
+
+    def run(self):
+        while True:
+            with self.cv:
+                while not self.queue:
+                    self.cv.wait()
+                item = self.queue.pop(0)
+                gen = self.gen
+            voice = setting("tts_voice", DEFAULT_VOICE)
+            for piece in pieces(item[0]):
+                if gen != self.gen:
+                    item[2] = "stopped"
+                    break
+                try:
+                    self.say_piece(piece, voice)
+                except OSError as e:
+                    log("%s" % e)
+                    break
+            if gen != self.gen:
+                item[2] = "stopped"
+            item[1].set()
+
+
+def serve(speaker, conn):
+    with conn:
+        conn.settimeout(10)
+        try:
+            data = b""
+            while b"\n" not in data and len(data) < 8192:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            return
+        line = data.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+        cmd, _, text = line.partition(" ")
+        if cmd == "stop":
+            speaker.stop()
+            answer = "ok"
+        elif cmd in ("say", "wait") and text.strip():
+            item = speaker.add(text)
+            if cmd == "wait":
+                conn.settimeout(None)
+                item[1].wait()
+                answer = item[2]
+            else:
+                answer = "ok" if item[2] != "busy" else "busy"
+        else:
+            answer = "error: say TEXT, wait TEXT or stop"
+        try:
+            conn.sendall((answer + "\n").encode())
+        except OSError:
+            pass
+
+
+def daemon():
+    os.makedirs(SOCK_DIR, exist_ok=True)
+    os.chmod(SOCK_DIR, 0o755)
+    try:
+        os.unlink(SOCK)
+    except FileNotFoundError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    # The GUI's apps and scripts (group wheel) may speak too
+    try:
+        import grp
+        os.chown(SOCK, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    os.chmod(SOCK, 0o660)
+    srv.listen(8)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    speaker = Speaker()
+    log("listening on %s" % SOCK)
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=serve, args=(speaker, conn), daemon=True).start()
+
+
+def client(args):
+    wait = False
+    if args and args[0] == "-s":
+        line = "stop"
+    else:
+        if args and args[0] == "-w":
+            wait = True
+            args = args[1:]
+        text = " ".join(args) if args else sys.stdin.read()
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            print("usage: s22-say [-w] TEXT... | -s", file=sys.stderr)
+            return 2
+        line = ("wait " if wait else "say ") + text
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+        s.sendall((line + "\n").encode())
+        answer = s.makefile().readline().strip()
+    except OSError as e:
+        print("s22-say: %s: %s (is the s22-say service running?)" % (SOCK, e.strerror),
+              file=sys.stderr)
+        return 1
+    if answer not in ("ok", "done"):
+        print("s22-say: " + answer, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["-d"]:
+        daemon()
+    elif sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+    else:
+        sys.exit(client(sys.argv[1:]))

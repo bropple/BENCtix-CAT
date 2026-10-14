@@ -1,0 +1,32 @@
+#!/bin/sh
+# s22-lidd hook: WiFi catches up as the lid opens (D072). While suspended
+# the phone does not look for WiFi; carried out of range it still holds the
+# old association (WoWLAN keeps it, D071), and mac80211 only notices the
+# access point is gone after a few seconds of missed beacons. So on open:
+# a scan of the current channel for the current access point (a fraction of
+# a second), and if it is not there, wpa_supplicant drops it and joins
+# whichever known network is in range.
+# Argument: open | closed (from s22-lidd).
+[ "${1:-}" = open ] || exit 0
+for d in /sys/class/ieee80211/*/device/net/*; do
+	[ -e "$d" ] || exit 0
+	dev=${d##*/}
+	break
+done
+link=$(iw dev "$dev" link 2>/dev/null) || exit 0
+bssid=$(echo "$link" | awk '/^Connected to/ {print $3}')
+[ -n "$bssid" ] || exit 0
+freq=$(echo "$link" | awk '/freq:/ {print int($2)}')
+# A scan that fails (busy: wpa_supplicant scanning) says nothing: leave it.
+# The associated access point is always listed (cfg80211 holds its entry):
+# it is there only if this scan just heard it ("last seen: N ms ago"). The
+# probe names no network (D076): opened somewhere else, the phone does not
+# call out the home network's name
+seen=$(iw dev "$dev" scan freq "$freq" 2>/dev/null) || exit 0
+ago=$(echo "$seen" | awk -v b="$bssid" '
+	/^BSS / { mine = (tolower(substr($2, 1, 17)) == tolower(b)) }
+	mine && /last seen: [0-9]+ ms ago/ { print $3; exit }')
+[ -n "$ago" ] && [ "$ago" -lt 3000 ] && exit 0
+logger -t s22-lidd "WiFi: the access point is gone; looking for another"
+wpa_cli -i "$dev" disconnect >/dev/null 2>&1
+wpa_cli -i "$dev" reconnect >/dev/null 2>&1

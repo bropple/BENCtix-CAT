@@ -1,0 +1,18 @@
+Getting around
+# Keys that work everywhere
+Home	The home screen. Apps close as you leave them; the Shell keeps running.
+Recents	The app you used before.
+Back	Back a step. On an app's first page, it closes the app.
+End	Ends or declines a call, and wakes the screen. Held for a second: the power menu (power off, reboot, reboot to lk2nd).
+Call	Answers a call. In Phone it dials; elsewhere it does nothing.
+Side key	Notifications. Pressed again: quick settings. Again: closed. Held: the flashlight, even with the screen off; with the lid shut, side + Volume down.
+Volume	Media volume. During a call, or with Phone in front: the call volume. While a call rings: silence it.
+End + Vol Down	A screenshot, saved to Pictures/screenshots. Photos shows them.
+Speaker key	During a call: speakerphone on or off.
+Lid	Closing it turns the screen off (and locks, with a PIN set). Opening it wakes the phone. With a call ringing, opening answers and closing declines.
+
+# The screen
+- Tap to choose, drag to scroll. Most lists work with a finger too.
+- The bar at the bottom says what Back and OK do on that page.
+- The status bar at the top: Wi-Fi, cellular, Bluetooth, the location arrow while GPS runs (grey while it searches, white with a fix), the vibrate or silent icon, the clock and the battery. While you type, it shows the T9 helper in the middle.
+- The screen turns off after the screen timeout (Settings, Display). Any key wakes it; that key does nothing else.

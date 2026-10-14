@@ -1,0 +1,17 @@
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*-BENCkernel-CAT/pkgbase
+Target = etc/benckernel-cat/cmdline
+
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = mkinitcpio
+
+[Action]
+Description = Updating BENCkernel-CAT initramfs and boot entries...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/benckernel-cat-update update

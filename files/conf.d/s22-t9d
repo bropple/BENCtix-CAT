@@ -1,0 +1,3 @@
+# s22-t9d options: -t TAP_MS (900) next-tap window, -l HOLD_MS (500) hold
+# for the digit
+T9D_ARGS=

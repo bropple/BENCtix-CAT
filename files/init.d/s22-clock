@@ -1,0 +1,117 @@
+#!/sbin/openrc-run
+# The system clock from the PMIC RTC plus a stored offset (D015).
+#
+# The PM8916 RTC keeps counting while the phone is off, but Linux cannot set
+# it (no allow-set-time; on Android a daemon kept an offset instead). So the
+# offset "real time minus RTC" is saved once the clock is known good (chrony
+# synced, or a clean shutdown after a sync) and the time is set from
+# RTC + offset at every boot, network or not.
+#
+# The RTC itself can restart from zero (seen after a forced power-off), which
+# makes the saved offset wrong until the next sync. The last known time is
+# kept too (with each save and at every clean shutdown), and the clock never
+# starts earlier than that.
+#
+# Without network time over WiFi, the cellular network's time (NITZ, which
+# the modem keeps once registered; asking it is a local QMI request, nothing
+# is transmitted) sets the clock and the offset: to the second, refined by
+# chrony once it syncs.
+
+description="Set the clock from the RTC and a saved offset"
+
+RTC=/sys/class/rtc/rtc0/since_epoch
+OFFSET=/var/lib/s22-clock/offset
+LAST=/var/lib/s22-clock/last
+QMI=/dev/wwan0qmi0
+
+depend() {
+	provide clock
+	need localmount
+	before chrony
+}
+
+synced() {
+	command -v chronyc >/dev/null &&
+		chronyc -n tracking 2>/dev/null | grep -q '^Leap status *: Normal'
+}
+
+save() {
+	local rtc
+	rtc=$(cat "$RTC") || return 1
+	checkpath -d -m 0755 "${OFFSET%/*}"
+	echo $(( $(date +%s) - rtc )) > "$OFFSET.new" && mv "$OFFSET.new" "$OFFSET"
+	save_last
+}
+
+save_last() {
+	checkpath -d -m 0755 "${LAST%/*}"
+	date +%s > "$LAST.new" && mv "$LAST.new" "$LAST"
+}
+
+# The cellular network's time as seconds since the epoch, or nothing
+nitz() {
+	local out d t
+	[ -c "$QMI" ] && command -v qmicli >/dev/null || return 1
+	out=$(timeout 20 qmicli -d "$QMI" --nas-get-network-time 2>/dev/null) || return 1
+	d=$(echo "$out" | sed -n "s/.*3GPP Date: *'\([0-9-]*\)'.*/\1/p")
+	t=$(echo "$out" | sed -n "s/.*3GPP Time: *'\([0-9:]*\)'.*/\1/p")
+	[ -n "$d" ] && [ -n "$t" ] || return 1
+	date -u -d "$d $t" +%s 2>/dev/null
+}
+
+# In the background after boot (s22-clock starts before chronyd and the
+# modem): save the offset once chrony has synced; until then, take the time
+# from the cellular network if the modem has it. Up to 10 minutes, then
+# chrony alone (waitsync, up to an hour).
+save_when_synced() {
+	local i n now from_nitz=
+	for i in $(seq 40); do
+		if synced; then
+			save
+			return 0
+		fi
+		if [ -z "$from_nitz" ] && n=$(nitz); then
+			now=$(date +%s)
+			if [ $((n - now)) -gt 2 ] || [ $((now - n)) -gt 2 ]; then
+				date -s "@$n" >/dev/null
+			fi
+			save
+			from_nitz=1
+		fi
+		sleep 15
+	done
+	command -v chronyc >/dev/null &&
+		chronyc -n waitsync 120 0.5 0 30 && synced && save
+}
+
+start() {
+	ebegin "Setting the clock from the RTC"
+	local rtc off last t
+	rtc=$(cat "$RTC" 2>/dev/null)
+	off=$(cat "$OFFSET" 2>/dev/null)
+	last=$(cat "$LAST" 2>/dev/null)
+	if [ -n "$rtc" ] && [ -n "$off" ]; then
+		t=$((rtc + off))
+		if [ -n "$last" ] && [ "$t" -lt "$last" ]; then
+			ewarn "RTC + offset is before the last known time (RTC reset?); using that"
+			t=$last
+		fi
+		date -s "@$t" >/dev/null
+		eend $?
+	elif [ -n "$last" ]; then
+		date -s "@$last" >/dev/null
+		eend $? "no saved offset; last known time until network time"
+	else
+		eend 0 "no saved offset yet; waiting for network time"
+	fi
+	# Save the offset once the time is known (in the background: up to an hour)
+	save_when_synced >/dev/null 2>&1 &
+}
+
+stop() {
+	# chronyd has usually stopped by now (it starts after this service), so
+	# only the last known time; the offset was saved after the sync
+	ebegin "Saving the last known time"
+	save_last
+	eend $?
+}

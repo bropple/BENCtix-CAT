@@ -1,0 +1,46 @@
+#!/sbin/openrc-run
+# The GUI: s22-wm on the main display, running as the owner, started by
+# seatd on the console in front (tty1). The getty under it comes back when
+# the GUI stops.
+
+description="Graphical interface"
+
+: ${GUI_USER:=micro}
+supervisor=supervise-daemon
+command=/usr/bin/s22-wm
+command_args="${S22_WM_ARGS}"
+command_user="${GUI_USER}:${GUI_USER}"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+output_log=/var/log/s22-gui.log
+error_log=/var/log/s22-gui.log
+
+depend() {
+	need seatd localmount s22-bus
+	after s22-t9d s22-settings agetty.tty1
+}
+
+start_pre() {
+	local home
+	id -u "$GUI_USER" >/dev/null || return 1
+	home=$(getent passwd "$GUI_USER" | cut -d: -f6)
+	# Our own runtime directory: /run/user/UID belongs to elogind, which
+	# creates it at the first login and removes it at the last logout
+	checkpath -d -m 0700 -o "$GUI_USER:$GUI_USER" /run/s22-gui
+	checkpath -f -m 0644 -o "$GUI_USER:$GUI_USER" /var/log/s22-gui.log
+	directory="$home"	# programs started from the GUI begin at home
+	export XDG_RUNTIME_DIR=/run/s22-gui HOME="$home" USER="$GUI_USER"
+	# The session bus (s22-bus), for every program the GUI starts
+	export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/s22-gui/bus
+	export LANG="${LANG:-en_US.UTF-8}" LIBSEAT_BACKEND=seatd
+	# the main display by its path: card numbers follow probe order, and the
+	# outer panel (or a boot framebuffer) can take card0
+	export WLR_DRM_DEVICES=/dev/dri/by-path/platform-1a01000.display-controller-card
+	export WLR_RENDERER="${S22_WM_RENDERER:-gles2}"
+	# freedreno switches a program to explicit sync once it uses a fence
+	# FD, which wlroots does; s22-wm's own frames then reached the display
+	# unfinished (flickering textures, old frames) with a GPU game running.
+	# Mesa does the same for Xwayland (D061)
+	export disable_explicit_sync_heuristic=true
+}

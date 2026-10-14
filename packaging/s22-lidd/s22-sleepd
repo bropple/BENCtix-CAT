@@ -1,0 +1,180 @@
+#!/bin/bash
+# s22-sleepd: suspend the phone (s2idle, which reaches VDD minimisation,
+# D069) while its lid is closed and nothing needs it awake (D070).
+#
+# Every POLL seconds it asks why the phone should stay awake: the lid open
+# (/run/s22-sleep/lid, from s22-lidd's hook), USB data connected (a
+# computer; a charger alone does not count), a call ringing or going on,
+# something playing (paused does not count), a sound device open (a
+# ringtone, a text's tone, speech), the outer screen lit, pacman running,
+# a file in /run/s22-sleep/inhibit/ (its name says who), or lid_suspend=off
+# in the settings. With no reason for GRACE seconds, and at least
+# AFTER_WAKE seconds after the last resume, it suspends. Any wakeup source
+# brings it back: the lid, the keys, the modem (a call or a text), the RTC.
+#
+# The kernel's wakeup_count makes it race-free: a wakeup between the check
+# and the suspend aborts the suspend instead of being lost.
+#
+# WiFi stays connected through a suspend: WoWLAN on magic packet only (the
+# firmware keeps the association and rekeys, and wakes the phone for
+# nothing else; without WoWLAN mac80211 disconnected at every suspend and
+# took seconds to come back). Set before each suspend, since the phy can be
+# made again (a WCNSS restart).
+#
+# Tailscale is paused (tailscale down) once the lid has been closed for
+# TS_AFTER seconds, and brought up again when it opens, unless the
+# tailscale_lid setting is "on": its relay and control servers' keepalives
+# are unicast to the phone, which no filter drops, and woke it every 24 s
+# (66% asleep; 99% with Tailscale down, D082). Only a Tailscale that was
+# running is paused, and only one paused here is brought up (a marker in
+# /var/lib, so a reboot meanwhile does not leave it down).
+#
+# /run/s22-sleep/state: "awake REASON", or "may sleep"; the log has every
+# suspend and how long it lasted. /run/s22-sleep/resumed is rewritten after
+# every resume (s22-celld reads the signal again then: its reports are off
+# while the lid is closed).
+POLL=2
+# Short: whatever a wake brings keeps the phone up by itself (a call's state,
+# a text's tone and speech, the outer screen lit by a key); at a weak signal
+# the modem wakes it every minute or so (IMS retries, D070)
+GRACE=4
+AFTER_WAKE=6
+# A cable plugged in or out wakes it (the USB-C controller): a computer
+# takes a few seconds to set up USB, and a suspend in between left the
+# link dead until a replug; a charger alone then lets it sleep again
+AFTER_CABLE=20
+CHARGER=/sys/class/power_supply/pm8916-lbc-chgr/online
+TS_AFTER=120
+TS_PAUSED=/var/lib/s22-sleep/tailscale
+RUN=/run/s22-sleep
+SETTINGS=/var/lib/s22/settings
+
+log() { echo "$(date '+%F %T') $*"; }
+
+wowlan() {
+	local p
+	for p in /sys/class/ieee80211/*; do
+		[ -e "$p" ] || continue
+		p=${p##*/}
+		iw phy "$p" wowlan show 2>/dev/null | grep -q 'magic packet' ||
+			iw phy "$p" wowlan enable magic-packet 2>/dev/null
+	done
+}
+
+# Device interrupts (not timers or IPIs), "IRQ count name" per line
+irqs() {
+	awk '$1 ~ /^[0-9]+:$/ && $NF !~ /timer/ { n = 0; for (i = 2; i <= 5; i++) n += $i; print $1, n, $NF }' /proc/interrupts
+}
+
+# WiFi after a resume: still linked, or not
+wifi_link() {
+	local d
+	for d in /sys/class/ieee80211/*/device/net/*; do
+		[ -e "$d" ] || continue
+		iw dev "${d##*/}" link 2>/dev/null | grep -q '^Connected' && { echo "WiFi linked"; return; }
+		echo "WiFi not linked"; return
+	done
+	echo "no WiFi"
+}
+
+# Tailscale: paused with the lid closed (see the top)
+ts_resume() {
+	[ "$(cat $TS_PAUSED 2>/dev/null)" = paused ] || return
+	: > $TS_PAUSED
+	log "lid open: tailscale up"
+	timeout 60 tailscale up --accept-dns=false >/dev/null 2>&1 &
+}
+
+ts_pause() {
+	[ "$(cat $TS_PAUSED 2>/dev/null)" = paused ] && return
+	[ "$(sed -n 's/^tailscale_lid=//p' "$SETTINGS" 2>/dev/null | tail -n 1)" = on ] && return
+	grep -qx 'tailscale=Running' /run/s22-vpn/state 2>/dev/null || return
+	echo paused > $TS_PAUSED
+	log "lid closed ${TS_AFTER} s: tailscale down"
+	timeout 30 tailscale down >/dev/null 2>&1
+}
+
+# Why stay awake; nothing (and false) if it may sleep
+reason() {
+	local v f
+	v=$(sed -n 's/^lid_suspend=//p' "$SETTINGS" 2>/dev/null | tail -n 1)
+	[ "$v" = off ] && { echo "lid_suspend=off"; return; }
+	[ "$(cat $RUN/lid 2>/dev/null)" = closed ] || { echo "lid open"; return; }
+	[ "$(cat /sys/class/udc/*/state 2>/dev/null)" = configured ] && { echo "USB data"; return; }
+	grep -q '^call ' /run/s22-call/state 2>/dev/null && { echo "call"; return; }
+	[ "$(cut -f1 /run/s22-gui/nowplaying 2>/dev/null)" = Playing ] && { echo "playing"; return; }
+	grep -qsx 'state: RUNNING' /proc/asound/card*/pcm*/sub*/status && { echo "sound"; return; }
+	[ "$(cat /sys/class/backlight/ext-backlight/bl_power 2>/dev/null)" = 4 ] || { echo "outer screen"; return; }
+	[ -e /var/lib/pacman/db.lck ] && { echo "pacman"; return; }
+	for f in $RUN/inhibit/*; do
+		[ -e "$f" ] && { echo "inhibit: ${f##*/}"; return; }
+	done
+	return 1
+}
+
+mkdir -p $RUN/inhibit ${TS_PAUSED%/*}
+ts_resume		# paused when the phone went down
+closed_t=0		# when the lid closed (0: open)
+calm=0			# seconds with no reason to stay awake
+cable=$(cat $CHARGER 2>/dev/null)
+cable_t=0		# when the cable last came or went
+woke=$(date +%s)	# the last resume (or the start)
+last=
+while sleep $POLL; do
+	c=$(cat $CHARGER 2>/dev/null)
+	if [ "$c" != "$cable" ]; then
+		cable=$c
+		cable_t=$(date +%s)
+	fi
+	if [ "$(cat $RUN/lid 2>/dev/null)" = closed ]; then
+		[ $closed_t = 0 ] && closed_t=$(date +%s)
+		[ $(( $(date +%s) - closed_t )) -ge $TS_AFTER ] && ts_pause
+	else
+		closed_t=0
+		ts_resume
+	fi
+	if [ $(( $(date +%s) - cable_t )) -lt $AFTER_CABLE ]; then
+		[ "$cable" = 1 ] && r="cable just plugged in" || r="cable just unplugged"
+	elif r=$(reason); then
+		:
+	else
+		r=
+	fi
+	if [ -n "$r" ]; then
+		calm=0
+		[ "$r" != "$last" ] && echo "awake $r" > $RUN/state
+		last=$r
+		continue
+	fi
+	[ "$last" != "may sleep" ] && echo "may sleep" > $RUN/state
+	last="may sleep"
+	calm=$((calm + POLL))
+	[ $calm -ge $GRACE ] && [ $(( $(date +%s) - woke )) -ge $AFTER_WAKE ] || continue
+	# Race-free: the count read before the last check, written back (a
+	# wakeup since then makes the write fail), then the suspend
+	count=$(cat /sys/power/wakeup_count) || continue
+	reason >/dev/null && continue
+	wowlan
+	echo "$count" > /sys/power/wakeup_count 2>/dev/null || { log "a wakeup came first"; continue; }
+	echo "suspended" > $RUN/state
+	irqs > $RUN/irqs.before
+	t0=$(date +%s)
+	if echo mem > /sys/power/state 2>/dev/null; then
+		woke=$(date +%s)
+		# The interrupt that ended it (CONFIG_PM_DEBUG; none for a wakeup
+		# event without one), then all that came while it slept and
+		# resumed (the resume's own among them)
+		w=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
+		[ -n "$w" ] && w="IRQ $w $(awk -v i="$w:" '$1 == i { print $NF }' /proc/interrupts)" || w="no IRQ"
+		by=$(irqs | awk 'NR == FNR { n[$1] = $2; next } $2 > n[$1] { printf "%s%s%s+%d", s, $1, $3, $2 - n[$1]; s = " " }' $RUN/irqs.before -)
+		by=${by:-?}
+		sleep 1
+		log "slept $((woke - t0)) s, woken by $w; since: $by; $(wifi_link) after 1 s"
+	else
+		woke=$(date +%s)
+		log "suspend aborted"
+	fi
+	date +%s > $RUN/resumed.new && mv -f $RUN/resumed.new $RUN/resumed
+	calm=0
+	last=
+done

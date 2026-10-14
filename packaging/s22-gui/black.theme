@@ -1,0 +1,9 @@
+# Black, like the console and the Shell
+bg=#000000
+fg=#e0e0e0
+dim=#8a8a8a
+accent=#ffb74d
+bar=#141414
+sel=#262626
+ok=#66bb6a
+warn=#4e1f1f

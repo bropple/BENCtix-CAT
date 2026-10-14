@@ -1,0 +1,20 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Keypad text input (multi-tap, modes) for the Cat S22 Flip.
+
+pkgname=s22-t9d
+pkgver=0.14
+pkgrel=1
+pkgdesc="Cat S22 Flip keypad text input through a virtual keyboard"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(glibc)
+source=(s22-t9d.c)
+sha256sums=(SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-t9d s22-t9d.c
+}
+
+package() {
+	install -Dm755 s22-t9d "$pkgdir/usr/bin/s22-t9d"
+}

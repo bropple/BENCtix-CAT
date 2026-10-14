@@ -1,0 +1,7 @@
+# The console keymap: US, plus /etc/s22-console.map, which keeps the
+# volume and power keys out of the tty.
+keymap="us"
+windowkeys="NO"
+extended_keymaps="/etc/s22-console.map"
+dumpkeys_charset=""
+fix_euro="NO"

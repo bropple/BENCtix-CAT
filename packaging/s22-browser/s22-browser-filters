@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""s22-browser-filters: the browser's ad blocking lists (D050, D054).
+
+Fetches EasyList (https://easylist.to) and uBlock Origin's own filters
+(uAssets, GPLv3), both Adblock Plus syntax, into DIR, and converts them
+together to WebKit's content blocker format (the JSON that
+WebKitUserContentFilterStore compiles), as DIR/adblock.json. The browser
+runs this when the lists are a week old, then compiles the result.
+
+uBlock's "!#if" blocks are kept only where their condition holds for
+WebKit's content blocker, which is Safari's: env_safari and env_mobile are
+true, everything else (env_chromium, env_firefox, cap_html_filtering, ...)
+false, with !, && and || as written.
+
+Converted:
+  network rules     ||host^, |start, end|, * and ^ wildcards, with the
+                    options third-party, domain=, match-case and the
+                    resource types; @@ exceptions (ignore-previous-rules,
+                    after every block rule); @@...$document allows a site
+  element hiding    ##selector (every site) and host##selector (those
+                    sites), as css-display-none
+Skipped, so they never block more than intended: regular expression
+rules, options WebKit has no way to express (redirect, csp, removeparam,
+generichide, ...), element hiding exceptions (#@#) and extended
+selectors (#?#, :has-text, :-abp-...).
+
+  s22-browser-filters DIR        fetch (if changed) and convert
+  s22-browser-filters -c FILE... convert FILEs together to stdout (testing)
+"""
+import json
+import os
+import re
+import sys
+import urllib.request
+
+LISTS = [
+    ("easylist", "https://easylist.to/easylist/easylist.txt"),
+    ("ublock", "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt"),
+]
+TRUE_TOKENS = {"env_safari", "env_mobile"}
+SEP = "[^-.%a-zA-Z0-9_]"            # Adblock Plus's ^, inside a pattern
+
+TYPES = {
+    "script": ["script"], "image": ["image"], "stylesheet": ["style-sheet"],
+    "font": ["font"], "media": ["media"], "object": ["other"],
+    "xmlhttprequest": ["fetch", "raw"], "subdocument": ["document"],
+    "popup": ["popup"], "ping": ["ping"], "websocket": ["websocket"],
+    "other": ["other"],
+}
+ALL_TYPES = ["image", "style-sheet", "script", "font", "raw", "svg-document",
+             "media", "popup", "ping", "fetch", "websocket", "other"]
+IGNORED = {"important", "~important", "1p", "first-party"}
+
+
+def pattern_to_regex(p):
+    """Adblock Plus pattern -> WebKit url-filter, or None."""
+    if not p or len(p) > 400 or not p.isascii():
+        return None
+    out = ""
+    if p.startswith("||"):
+        out = "^[^:]+://+([^:/]+\\.)?"
+        p = p[2:]
+    elif p.startswith("|"):
+        out = "^"
+        p = p[1:]
+    end = p.endswith("|")
+    if end:
+        p = p[:-1]
+    p = p.lstrip("*")
+    if p.endswith("^"):              # also the end of the address: drop it
+        p = p[:-1]
+    for i, ch in enumerate(p):
+        if ch == "*":
+            out += ".*"
+        elif ch == "^":
+            out += SEP
+        elif ch in ".+?${}()[]\\|":
+            out += "\\" + ch
+        else:
+            out += ch
+    if end:
+        out += "$"
+    if out in ("", "^", "^[^:]+://+([^:/]+\\.)?"):
+        return None
+    return out.lower() if p == p.lower() else out
+
+
+def domains(spec, sep):
+    inc, exc = [], []
+    for d in spec.split(sep):
+        d = d.strip().lower()
+        if not d or not d.isascii() or "*" in d or "/" in d:
+            continue
+        (exc if d.startswith("~") else inc).append("*" + d.lstrip("~"))
+    return inc, exc
+
+
+def network(line):
+    """One network rule -> (is_exception, rule) or None."""
+    exc = line.startswith("@@")
+    if exc:
+        line = line[2:]
+    pat, opts = line, ""
+    if "$" in line:
+        pat, _, opts = line.rpartition("$")
+        if not re.fullmatch(r"[\w~,=|.\-*]*", opts):
+            pat, opts = line, ""        # a $ inside the pattern
+    if pat.startswith("/") and pat.endswith("/") and len(pat) > 1:
+        return None                     # regular expressions
+    trig, types, neg = {}, [], []
+    document = False
+    for o in filter(None, opts.split(",")):
+        o = o.strip().lower()
+        if o in IGNORED:
+            continue
+        if o == "third-party" or o == "3p":
+            trig["load-type"] = ["third-party"]
+        elif o in ("~third-party", "~3p"):
+            trig["load-type"] = ["first-party"]
+        elif o == "match-case":
+            trig["url-filter-is-case-sensitive"] = True
+        elif o.startswith("domain="):
+            inc, ex = domains(o[7:], "|")
+            if inc:
+                trig["if-domain"] = inc
+            elif ex:
+                trig["unless-domain"] = ex
+        elif o == "document" and exc:
+            document = True
+        elif o in TYPES:
+            types += TYPES[o]
+        elif o.startswith("~") and o[1:] in TYPES:
+            neg += TYPES[o[1:]]
+        else:
+            return None                 # an option WebKit cannot express
+    if document:                        # @@||site^$document: allow the site
+        host = re.fullmatch(r"\|\|([a-z0-9.-]+)\^?", pat.lower())
+        if not host:
+            return None
+        return True, {"trigger": {"url-filter": ".*",
+                                  "if-domain": ["*" + host.group(1)]},
+                      "action": {"type": "ignore-previous-rules"}}
+    regex = pattern_to_regex(pat)
+    if regex is None:
+        return None
+    trig = {"url-filter": regex, **trig}
+    if neg and not types:
+        types = [t for t in ALL_TYPES if t not in neg]
+    if types:
+        trig["resource-type"] = sorted(set(types))
+    act = "ignore-previous-rules" if exc else "block"
+    return exc, {"trigger": trig, "action": {"type": act}}
+
+
+def hiding(line):
+    """One element hiding rule -> (domains tuple, selector) or None."""
+    if "#@#" in line or "#?#" in line or "#$#" in line or "#%#" in line:
+        return None
+    dom, _, sel = line.partition("##")
+    sel = sel.strip()
+    if not sel or ":-abp-" in sel or ":has-text" in sel or ":contains" in sel \
+            or ":xpath" in sel or ":upward" in sel or ":remove" in sel \
+            or ":style" in sel or ":matches-" in sel or not sel.isascii():
+        return None
+    inc, exc = domains(dom, ",") if dom else ([], [])
+    if dom and not inc and not exc:
+        return None
+    return (tuple(inc), tuple(exc)), sel
+
+
+def condition(expr):
+    """An !#if expression, as it is for WebKit's content blocker."""
+    expr = expr.replace("&&", " and ").replace("||", " or ")
+    out = []
+    for tok in re.findall(r"!|\(|\)|and|or|[a-z_0-9]+", expr):
+        if tok == "!":
+            out.append("not")
+        elif tok in ("(", ")", "and", "or"):
+            out.append(tok)
+        else:
+            out.append(str(tok in TRUE_TOKENS))
+    try:
+        return bool(eval(" ".join(out), {"__builtins__": {}}))
+    except Exception:
+        return False
+
+
+def kept_lines(text):
+    """The lines outside false !#if blocks (nested, with !#else)."""
+    stack = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("!#if "):
+            stack.append(condition(line[5:]))
+            continue
+        if line.startswith("!#else"):
+            if stack:
+                stack[-1] = not stack[-1]
+            continue
+        if line.startswith("!#endif"):
+            if stack:
+                stack.pop()
+            continue
+        if all(stack):
+            yield line
+
+
+def convert(*texts):
+    blocks, exceptions = [], []
+    generic, specific = [], {}
+    for line in (l for t in texts for l in kept_lines(t)):
+        if not line or line.startswith("!") or line.startswith("["):
+            continue
+        if "##" in line or "#@#" in line or "#?#" in line:
+            h = hiding(line)
+            if h is None:
+                continue
+            key, sel = h
+            if key == ((), ()):
+                generic.append(sel)
+            else:
+                specific.setdefault(key, []).append(sel)
+            continue
+        r = network(line)
+        if r:
+            (exceptions if r[0] else blocks).append(r[1])
+    rules = []
+    # Generic hiding first, in chunks (one rule per few hundred selectors)
+    for i in range(0, len(generic), 250):
+        rules.append({"trigger": {"url-filter": ".*"},
+                      "action": {"type": "css-display-none",
+                                 "selector": ", ".join(generic[i:i + 250])}})
+    for (inc, exc), sels in specific.items():
+        trig = {"url-filter": ".*"}
+        if inc:
+            trig["if-domain"] = list(inc)
+        else:
+            trig["unless-domain"] = list(exc)
+        rules.append({"trigger": trig,
+                      "action": {"type": "css-display-none",
+                                 "selector": ", ".join(sels)}})
+    return rules + blocks + exceptions
+
+
+def fetch(url, path):
+    """Download url to path unless it is unchanged; True if it is there."""
+    req = urllib.request.Request(url, headers={"User-Agent": "s22-browser"})
+    if os.path.exists(path):
+        req.add_header("If-Modified-Since", __import__("email.utils").utils
+                       .formatdate(os.path.getmtime(path), usegmt=True))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = r.read()
+        tmp = path + ".new"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except urllib.error.HTTPError as e:
+        if e.code != 304:
+            print(f"s22-browser-filters: {url}: {e}", file=sys.stderr)
+    except OSError as e:
+        print(f"s22-browser-filters: {url}: {e}", file=sys.stderr)
+    return os.path.exists(path)
+
+
+def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "-c":
+        texts = []
+        for name in sys.argv[2:]:
+            with open(name, encoding="utf-8", errors="replace") as f:
+                texts.append(f.read())
+        json.dump(convert(*texts), sys.stdout)
+        return 0
+    if len(sys.argv) != 2:
+        print(__doc__.strip().splitlines()[-2:], file=sys.stderr)
+        return 2
+    d = sys.argv[1]
+    os.makedirs(d, exist_ok=True)
+    texts = []
+    for name, url in LISTS:
+        src = os.path.join(d, name + ".txt")
+        if fetch(url, src):
+            with open(src, encoding="utf-8", errors="replace") as f:
+                texts.append(f.read())
+    if not texts:
+        return 1
+    rules = convert(*texts)
+    out = os.path.join(d, "adblock.json")
+    with open(out + ".new", "w") as f:
+        json.dump(rules, f, separators=(",", ":"))
+    os.replace(out + ".new", out)
+    print(len(rules))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# libqrtr and the qrtr tools. ALARM does not package it. The name service
+# is in the kernel, so qrtr-ns is not built.
+
+pkgname=qrtr
+pkgver=1.2
+pkgrel=1
+pkgdesc="Userspace library and tools for the Qualcomm IPC Router"
+arch=(aarch64)
+url="https://github.com/linux-msm/qrtr"
+license=(BSD-3-Clause)
+depends=(glibc)
+makedepends=(git meson)
+source=("git+https://github.com/linux-msm/qrtr.git#commit=b51ffaf22707b6000ecfb894c5b750f3bb7843b2")
+sha256sums=(SKIP)
+
+build() {
+	arch-meson qrtr build -Dqrtr-ns=disabled -Dsystemd-service=disabled
+	meson compile -C build
+}
+
+package() {
+	meson install -C build --destdir "$pkgdir"
+	install -Dm644 qrtr/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

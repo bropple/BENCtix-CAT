@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# GPS from the modem's location engine (/run/s22-gnss): idle until a client
+# holds it, the receiver running only then (D079).
+
+description="GPS on demand"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-gnssd
+command_args="${GNSSD_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-gnssd.log
+error_log=/var/log/s22-gnssd.log
+
+depend() {
+	need rmtfs
+	after tqftpserv s22-celld
+}

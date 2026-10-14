@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# Keypad text input (s22-t9d): grabs the keypad and types through a virtual
+# keyboard. Stopping it gives the raw keypad back.
+
+description="Cat S22 Flip keypad text input"
+
+command=/usr/bin/s22-t9d
+command_args="${T9D_ARGS}"
+command_background=true
+pidfile=/run/s22-t9d.pid
+output_log=/var/log/s22-t9d.log
+error_log=/var/log/s22-t9d.log
+
+depend() {
+	need localmount
+	after udev-trigger
+	before agetty.tty1
+}
+
+start_pre() {
+	modprobe -q uinput
+}

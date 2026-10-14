@@ -1,0 +1,9 @@
+LIBSYSTEMD_209 {
+	global:
+		sd_journal_send;
+		sd_journal_send_with_location;
+		sd_notify;
+		sd_notifyf;
+	local:
+		*;
+};

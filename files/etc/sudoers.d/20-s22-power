@@ -1,0 +1,2 @@
+# BENCtix-CAT (D043): the GUI power menu powers off and reboots through this
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/s22-power

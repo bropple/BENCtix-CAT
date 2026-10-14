@@ -1,0 +1,5 @@
+# s22-batteryd options: -l LOGDIR (default /home/s22-battery, the SD card),
+# -i SECONDS between log lines (300), -p PERCENT to power off at (5),
+# -r PERCENT to re-arm at after a low-battery power-off (20),
+# -n log only, never power off, -v verbose
+BATTERY_ARGS=

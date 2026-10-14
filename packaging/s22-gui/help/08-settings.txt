@@ -1,0 +1,17 @@
+Settings
+Up, Down	Choose a row.
+OK, Left, Right	Change it, or open its page.
+Back	Up a page; from the first page, close Settings.
+
+# Pages
+- A saved Wi-Fi network's page has Private address: the network sees an address of its own instead of this phone's (the same one each time you join it). Networks without a password, the public ones, get it when you add them; your own keep the phone's address. Turning it on or off joins again, with a new IP.
+- Network and internet: Wi-Fi (scan, connect, forget), the mobile network (cellular on or off, mobile data, a test), VPN (Tailscale and Mullvad logins; Tailscale paused while the lid is closed, so the battery lasts longer, unless set to stay connected), and File sharing (see that topic).
+- Connected devices: Bluetooth (pair, connect, forget). A code to compare is shown here during pairing.
+- Display: sleep with the lid closed (on: the phone sleeps while the lid is closed and nothing plays; a call, a text, a key or opening the lid wake it).
+- Display, and the outer screen: wallpapers for the home screen, the lock screen and the outer screen, chosen in Photos' Wallpapers tab (see Photos), and how fast a moving one plays on the outer screen.
+- Sounds: sounds on or vibrate only, volumes, ringtone, notification sounds per app.
+- Vibration: strength, patterns, and your own (hold OK in the rhythm you want).
+- Security: the PIN lock.
+- Accessibility: speech. Say who is calling (between rings) and read texts aloud (who it is from, then the text), at the ring volume and not while sounds are off. Voice: BENCmouth's voices, each heard as you choose it; Hear the voice plays a sample.
+- About, and Developer options (the call microphone test).
+- Passwords, keys and account numbers show as stars as you type.

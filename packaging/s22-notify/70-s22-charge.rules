@@ -1,0 +1,2 @@
+# The charger's sound (D073): plugged in or unplugged
+SUBSYSTEM=="power_supply", KERNEL=="pm8916-lbc-chgr", ACTION=="add|change", RUN+="/usr/bin/s22-charge-sound %E{ACTION} %E{POWER_SUPPLY_ONLINE}"

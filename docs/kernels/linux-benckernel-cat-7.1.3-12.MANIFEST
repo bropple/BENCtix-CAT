@@ -1,0 +1,7 @@
+release       7.1.3-12-BENCkernel-CAT
+kernel commit 6627c7da1b85 (s22flip)
+built         2026-10-06T00:04:12Z on BENCBENCH
+config sha256 d554d6cc128d7c7cfc815905f1a9c01c16c2c7d0918611a7d0a7856e330eea9f
+package       linux-benckernel-cat-7.1.3-12-aarch64.pkg.tar.zst
+pkg sha256    2d504b36d18eaae988ede9296a8fc5b0f720bd851eaa9a2f29bf004d59a6fd72
+modules       767

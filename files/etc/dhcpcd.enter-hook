@@ -1,0 +1,5 @@
+# BENCtix-CAT (D031): the router advertises every few seconds, and dhcpcd
+# runs every hook for each advertisement. dhcpcd configures the address
+# itself; the hooks would only copy IPv6 DNS servers from the
+# advertisement into resolv.conf, and DHCPv4 provides DNS. Skip those runs.
+[ "$reason" = ROUTERADVERT ] && exit 0

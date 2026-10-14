@@ -1,0 +1,55 @@
+Music
+- Songs come from Music on the SD card, in any folders. Nearly every format plays: MP3, FLAC, Ogg, Opus, AAC and M4A, ALAC, WAV, WMA, APE and more.
+- The music keeps playing when you leave the app; with the lid closed, the outer screen shows what plays. The notification list and the lock screen show it too, with its buttons.
+- While a song is loaded, a bar at the bottom shows it: its cover (dimmed while paused), title, artist, and how far along. Tap it for the now playing screen.
+- Opened while a song is loaded (playing or paused), Music opens on the now playing screen; Back goes to the lists.
+- Covers come from the song's folder (albumart.jpg, cover.jpg, folder.jpg or any picture there), else from the song itself. A record stands in when there is none.
+
+# The lists
+Left, Right	The tabs: Folders, Artists, Albums, Songs, Playlists, Queue.
+Up, Down	Choose.
+4, 6	A page up or down (held: page after page).
+1, 3	The letter before or after: to the first B, C, ... (in the lists by name).
+OK	A song: play its folder from it. A folder: open it. A playlist: play it (in Playlists: open it).
+*	More: play next, add to the queue, add to a playlist, shuffle all.
+5	Play or pause.
+#	The now playing screen (or tap the bar at the bottom).
+Back	Up a folder, out of a playlist, artist or album; at the top, close the app.
+
+# Artists and Albums
+- They go by the songs' tags (artist, album artist, album, track number), read in the background: the first time takes about half a minute, later only new songs are read.
+- An album is its album artist's; without one, the songs in its folder. An album without a name takes its folder's.
+- Artists: everyone an album or a song names. Several names in one tag, separated by ";", each count.
+- An artist's page: All songs first, then their albums by year, then the albums they are on.
+- In an album, OK plays it from that song.
+
+# Songs
+- Every song in Music, in any folder, by name (without the track number at the start of the file name).
+- OK plays all of them from that song; * then Shuffle all plays them all shuffled.
+
+# Playlists
+- The first row makes a new playlist. Ours are kept in Music/Playlists; playlists elsewhere in Music show too.
+- In a playlist: OK plays from that song, C removes it, * then Move moves it with Up and Down.
+- In Folders, * on a song or a whole folder adds it to a playlist.
+
+# Queue
+- What plays, in order. OK jumps to a song; C removes it.
+
+# Now playing
+OK, 5	Play or pause.
+C	Stop. The queue stays: OK on a song in Queue plays again.
+Left, Right	The song before (or its start) or after.
+Left, Right held	Scrub back or ahead, faster after two seconds.
+4, 6	Ten seconds back or ahead.
+1, 3	A minute back or ahead.
+7	Shuffle on or off.
+9	Repeat: all, one, off.
+0	The visualizer: bars, spectrum, scope, off.
+*	Add the song to a playlist.
+- Tap the bar to jump there; tap elsewhere to play or pause.
+- Play or pause shows small between the song's times. The visualizer sits under the bar while a song plays; it listens only while it shows (not with the screen off or the lid closed).
+
+# With the lid closed
+Side key twice	Play or pause.
+Volume	The volume.
+Volume held	The next or previous song.

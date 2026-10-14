@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# The phone's VPNs: Mullvad (WireGuard) as the "mullvad" setting says, the
+# Tailscale login, and /run/s22-vpn/state for Settings (D036).
+
+description="VPN switch and status (Tailscale, Mullvad)"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-vpnd
+command_args="${VPND_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-vpnd.log
+error_log=/var/log/s22-vpnd.log
+
+depend() {
+	after tailscaled dhcpcd wpa_supplicant s22-celld
+}

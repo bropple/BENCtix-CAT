@@ -1,0 +1,18 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# GPS from the modem's location engine, on demand (D079). The OpenRC
+# service is in files/init.d.
+
+pkgname=s22-gnssd
+pkgver=0.1
+pkgrel=1
+pkgdesc="Cat S22 Flip: GPS from the modem's location engine, while a client holds it"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python python-gobject libqmi)
+source=(s22-gnssd s22-gnss)
+sha256sums=(SKIP SKIP)
+
+package() {
+	install -Dm755 s22-gnssd "$pkgdir/usr/bin/s22-gnssd"
+	install -Dm755 s22-gnss "$pkgdir/usr/bin/s22-gnss"
+}

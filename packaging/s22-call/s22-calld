@@ -1,0 +1,1322 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-calld: voice calls without a GUI (D028).
+
+Watches the modem's QMI Voice call status. An incoming call rings (the
+vibrator, repeating) and posts a "call" notification with the caller's
+number. It is answered by opening the lid or the Call key, and ended or
+rejected by closing the lid or the End key (the power key, short press).
+While a call is up, the call audio (the modem's voice session on the ADSP,
+VoiceMMode1) is routed to the earpiece and the keypad microphone, and the
+voice PCM is held open; it is undone when the last call ends.
+
+Outgoing calls and control: `s22-call` and the Phone app talk to this
+daemon over /run/s22-call.sock (root and group wheel): dial NUMBER,
+answer, hangup, reject, dtmf DIGIT, mute on|off, status. Nothing is ever
+dialled by the daemon itself.
+
+For the Phone app: STATE has a "call ID DIRECTION STATE SINCE NUMBER" line
+a call (SINCE: when it was answered, or first seen; epoch seconds) and
+mute=0|1; each ended call is a line of LOG, "EPOCH<TAB>DIRECTION<TAB>
+NUMBER<TAB>RESULT<TAB>SECONDS" (RESULT: answered, missed, rejected,
+outgoing, unanswered). A ringing call posts a "call" notification whose
+link (call:incoming) s22-shell opens at once; a missed one leaves a
+"missed-call" notification. Names come from the contacts (CONTACTS).
+
+Volume: the earpiece follows the call_volume setting (1-7, s22-wm changes
+it with the volume keys); the microphone gets the call_mic_adc and
+call_mic_digital settings' gain during a call (Settings > Developer
+options, tried with s22-mictest; else CALL_MIC_ADC/CALL_MIC_DIGITAL from
+/etc/conf.d/s22-call), back to 0 dB after.
+
+Speakerphone: the speaker key (SPEAKER_KEY) or "speaker on|off|toggle"
+moves the call's voice between the earpiece (Primary MI2S, the codec's
+RX1) and the loudspeaker (Quinary MI2S, the AW88194), briefly reopening
+the voice session, which takes its ports when it starts. On the speaker
+the call volume drives the amp's "Speaker Volume"; the system volume
+(the volume setting) is put back when the call ends. STATE has speaker=.
+
+Ringtone: a ringing call plays the caller's ringtone (X-S22-RINGTONE in
+the contacts), else the ringtone setting, else DEFAULT_RINGTONE, looping
+through s22-play at the ring volume, unless sounds=off; "silence" (s22-wm
+sends it on a volume key) stops the ringtone and the vibration. With
+tts_calls=on (Settings, Accessibility, D065) s22-say says "Call from NAME"
+(the contact, else the number digit by digit), the ringtone plays for
+RING_SPELL seconds, and so on while the call rings.
+
+Ring vibration (D042): the caller's call vibration (X-S22-CALLVIB), else
+vib_ring, else 900 on, 600 off, repeated while the call rings; none with
+vibrate=off; at vib_strength (1-15).
+
+Ringback: while an outgoing call is alerting (the other phone rings) the
+network sends no tone, so s22-ringback plays one on the earpiece beside
+the voice path (MultiMedia1 on PRI_MI2S_RX).
+
+Other sound (D085): while a call rings, every other stream in the GUI's
+PipeWire is turned down by DUCK_DB from where it was; once a call has audio (answered, or
+dialled), they are muted at once, the media players (MPRIS) playing are
+paused, and streams that start meanwhile are muted as they come. When the
+calls end, all is put back and the players paused here play again. Ours
+(the ringtone, speech, these tones: s22-play, s22-calld) are left alone.
+While a call has audio the card's media playback (MultiMedia1, under the
+sound server's s22.speaker) goes where the voice goes, so the ringback and
+the keypad's tones are heard at the ear; a digit sent ("dtmf") sounds its
+DTMF tone there for DTMF_MS.
+
+At the ear: while a call has audio, the proximity sensor is held from
+s22-sensord and STATE says near=0|1; s22-wm turns the display off and
+ignores touches while it is near.
+
+Voicemail: the SIM's mailbox number (EF_MBI says which EF_MBDN record is
+voicemail; read through qmicli at start) goes to VOICEMAIL for the Phone
+app, and "voicemail" dials it.
+
+Settings in /etc/conf.d/s22-call: CALL_ARGS, -v verbose, -L to disable
+lid answer/hang-up.
+
+  s22-calld [-v] [-L]
+"""
+import fcntl, grp, json, math, os, signal, socket, struct, subprocess, sys, threading, time
+
+SOCK = "/run/s22-call.sock"
+STATE_DIR = "/run/s22-call"
+STATE = STATE_DIR + "/state"
+LOG_DIR = "/var/lib/s22-call"
+LOG = LOG_DIR + "/log"
+NOTIFY_DIR = "/run/s22-notify"
+CONTACTS = "/var/lib/s22/contacts.vcf"
+DTMF_MS = 160
+VOICEMAIL = STATE_DIR + "/voicemail"
+QMI_DEV = "/dev/wwan0qmi0"
+USIM = "0x3F00-0x7FFF-"
+MUTE_CTL = "VoiceMMode1 Capture Mixer TERT_MI2S_TX"
+PCM = "hw:0,3"
+LID_ACTIONS = "-L" not in sys.argv[1:]
+verbose = "-v" in sys.argv[1:]
+
+EV_KEY, EV_SW, EV_FF = 0x01, 0x05, 0x15
+KEY_ENTER, KEY_POWER, SW_LID = 28, 116, 0
+SPEAKER_KEY = 248           # KEY_MICMUTE: the keypad's speaker key (r2c0)
+RING = "900,600"                        # on, off ms, repeated
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), "s22-calld:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+# ------------------------------------------------------------------ audio
+SETTINGS = "/var/lib/s22/settings"
+SENSORD = "/run/s22-sensord.sock"
+# Microphone gain in a call: ADC1 in 6 dB steps (0-8), TX1 (the decimator)
+# in dB above 84: +24 dB and +4 dB, tried by ear with s22-mictest
+MIC_ADC = os.environ.get("CALL_MIC_ADC", "4")
+MIC_DIGITAL = os.environ.get("CALL_MIC_DIGITAL", "88")
+CALL_VOL_DEF = 4
+
+
+def setting(key, default):
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == key:
+                    return v
+    except OSError:
+        pass
+    return default
+
+
+def earpiece_volume():
+    """RX1 Digital Volume for the call_volume setting (as s22-wm has it)"""
+    try:
+        level = max(1, min(7, int(setting("call_volume", CALL_VOL_DEF))))
+    except ValueError:
+        level = CALL_VOL_DEF
+    return str(84 + (level - CALL_VOL_DEF) * 4)
+
+
+def speaker_call_volume():
+    """Speaker Volume (0.5 dB units) for the call_volume setting, as s22-wm
+    has it: -4 dB (stock's top) at 7, 2 dB a step"""
+    try:
+        level = max(1, min(7, int(setting("call_volume", CALL_VOL_DEF))))
+    except ValueError:
+        level = CALL_VOL_DEF
+    return str(184 - (7 - level) * 4)
+
+
+STUCK_CALL_S = 60          # a dial still not ringing after this: ask the modem
+AMP_STOCK = "184"           # Speaker Volume outside speakerphone (D040)
+DEFAULT_RINGTONE = "/usr/share/sounds/aosp/ringtones/Ring_Synth_04.ogg"
+SAY_SOCK = "/run/s22-say/sock"
+RING_SPELL = 6              # seconds of ringtone between the caller's name
+PIPEWIRE_DIR = "/run/s22-gui"
+
+
+EARPIECE = [
+    ("QUIN_MI2S_RX Voice Mixer VoiceMMode1", "0"),
+    ("PRI_MI2S_RX Voice Mixer VoiceMMode1", "1"),
+    ("RX1 MIX1 INP1", "RX1"),
+    ("EAR_S", "Switch"),
+    ("RX1 Digital Volume", earpiece_volume),
+]
+SPEAKER = [
+    ("PRI_MI2S_RX Voice Mixer VoiceMMode1", "0"),
+    ("EAR_S", "ZERO"),
+    ("QUIN_MI2S_RX Voice Mixer VoiceMMode1", "1"),
+    ("Speaker Volume", speaker_call_volume),
+]
+MIXER_ON = [
+    ("VoiceMMode1 Capture Mixer TERT_MI2S_TX", "1"),
+    ("CIC1 MUX", "AMIC"),
+    ("DEC1 MUX", "ADC1"),
+    ("ADC1 Volume", lambda: setting("call_mic_adc", MIC_ADC)),
+    ("TX1 Digital Volume", lambda: setting("call_mic_digital", MIC_DIGITAL)),
+]
+# The card's media playback (MultiMedia1: the sound server's s22.speaker)
+# with the call's voice, or (no call) on the loudspeaker
+MEDIA_EAR = [
+    ("QUIN_MI2S_RX Audio Mixer MultiMedia1", "0"),
+    ("PRI_MI2S_RX Audio Mixer MultiMedia1", "1"),
+]
+MEDIA_SPEAKER = [
+    ("PRI_MI2S_RX Audio Mixer MultiMedia1", "0"),
+    ("QUIN_MI2S_RX Audio Mixer MultiMedia1", "1"),
+]
+MIXER_OFF = [
+    ("PRI_MI2S_RX Voice Mixer VoiceMMode1", "0"),
+    ("QUIN_MI2S_RX Voice Mixer VoiceMMode1", "0"),
+    ("Speaker Volume", AMP_STOCK),
+    ("VoiceMMode1 Capture Mixer TERT_MI2S_TX", "0"),
+    ("EAR_S", "ZERO"),
+    ("ADC1 Volume", "0"),
+    ("TX1 Digital Volume", "84"),
+]
+
+
+def cset(name, value):
+    r = subprocess.run(["amixer", "-q", "-c", "0", "cset", "name=" + name, value],
+                       capture_output=True, text=True)
+    if r.returncode:
+        log("amixer %s=%s: %s" % (name, value, r.stderr.strip()))
+
+
+def mix(controls):
+    for n, v in controls:
+        cset(n, v() if callable(v) else v)
+
+
+class Audio:
+    def __init__(self):
+        self.procs = []
+        self.speaker = False
+
+    def hold(self):
+        # Hostless: started and held, never read or written (s22-pcmhold)
+        self.procs = [subprocess.Popen(["s22-pcmhold", PCM], stderr=subprocess.PIPE)]
+
+    def release(self):
+        for p in self.procs:
+            p.terminate()
+        for p in self.procs:
+            try:
+                p.wait(3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self.procs = []
+
+    def on(self):
+        if self.procs:
+            return
+        mix(MIXER_ON)
+        mix(SPEAKER if self.speaker else EARPIECE)
+        mix(MEDIA_SPEAKER if self.speaker else MEDIA_EAR)
+        self.hold()
+        log("call audio on (%s, keypad mic)" % ("speaker" if self.speaker else "earpiece"))
+
+    def route(self, speaker):
+        """Earpiece or loudspeaker; a call in progress moves over"""
+        if speaker == self.speaker:
+            return
+        self.speaker = speaker
+        if not self.procs:
+            return
+        self.release()          # the voice session takes its ports at start
+        mix(SPEAKER if speaker else EARPIECE)
+        mix(MEDIA_SPEAKER if speaker else MEDIA_EAR)
+        self.hold()
+        log("call audio on the %s" % ("speaker" if speaker else "earpiece"))
+
+    def off(self):
+        if not self.procs:
+            return
+        self.release()
+        mix(MIXER_OFF)
+        mix(MEDIA_SPEAKER)
+        self.speaker = False
+        log("call audio off")
+
+    def check(self):
+        for p in self.procs:
+            if p.poll() is not None:
+                err = p.stderr.read().decode(errors="replace").strip() if p.stderr else ""
+                log("voice PCM process exited (%s): %s" % (p.returncode, err[:200]))
+                self.procs.remove(p)
+
+
+# --------------------------------------------------------------- contacts
+def contact_name(number):
+    """The contact's name for a number (last ten digits agree), or None"""
+    def tail(n):
+        d = "".join(ch for ch in n if ch.isdigit())
+        return d[-10:] if len(d) >= 7 else "=" + d
+    want = tail(number or "")
+    name, fn, nname = None, None, None
+    try:
+        with open(CONTACTS, errors="replace") as f:
+            text = f.read().replace("\r\n ", "").replace("\n ", "")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, _, val = line.partition(":")
+        key = key.split(".")[-1].upper()
+        if key == "BEGIN":
+            fn = nname = None
+        elif key == "FN" or key.startswith("FN;"):
+            fn = val.replace("\\,", ",").replace("\\;", ";")
+        elif key == "N" or key.startswith("N;"):
+            p = val.split(";") + ["", ""]
+            nname = (p[1] + " " + p[0]).strip()
+        elif key.startswith("TEL") and number and tail(val) == want:
+            name = fn or nname
+            if name:
+                return name
+    return None
+
+
+def contact_field(number, field):
+    """A contact's FIELD (X-S22-RINGTONE) for a number, or "" """
+    def tail(n):
+        d = "".join(ch for ch in n if ch.isdigit())
+        return d[-10:] if len(d) >= 7 else "=" + d
+    want = tail(number or "")
+    try:
+        with open(CONTACTS, errors="replace") as f:
+            text = f.read().replace("\r\n ", "").replace("\n ", "")
+    except OSError:
+        return ""
+    match, val = False, ""
+    for line in text.splitlines():
+        key, _, v = line.partition(":")
+        key = key.split(".")[-1].upper()
+        if key == "BEGIN":
+            match, val = False, ""
+        elif key.startswith("TEL") and number and tail(v) == want:
+            match = True
+        elif key == field or key.startswith(field + ";"):
+            val = v.strip()
+        elif key == "END" and match:
+            return val
+    return ""
+
+
+def pipewire_env():
+    """s22-play and aplay into the loudspeaker node of the GUI's PipeWire"""
+    if not os.path.exists(PIPEWIRE_DIR + "/pipewire-0"):
+        return None
+    env = dict(os.environ, PIPEWIRE_RUNTIME_DIR=PIPEWIRE_DIR, PIPEWIRE_NODE="s22.speaker")
+    return env
+
+
+def say(line, timeout=None):
+    """A line to s22-say ("wait TEXT", "stop"); its answer, or None"""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(SAY_SOCK)
+            s.sendall((line + "\n").encode())
+            return s.makefile().readline().strip()
+    except OSError:
+        return None
+
+
+def spoken_who(number):
+    """Who is calling, to be said: the contact, or the number digit by digit"""
+    name = contact_name(number)
+    if name:
+        return name
+    digits = " ".join(ch for ch in number if ch.isdigit())
+    return digits or "an unknown number"
+
+
+class Ringtone:
+    """The ringtone, looping, until the call is answered, ends or is
+    silenced; with tts_calls=on, the caller's name between rings"""
+    def __init__(self):
+        self.p = None
+        self.lock = threading.Lock()
+        self.ringing = False
+        self.thread = None
+        self.gen = 0                # a new ring's, so an old thread ends
+
+    def on(self, number):
+        if self.ringing or setting("sounds", "on") == "off":
+            return
+        tone = contact_field(number, "X-S22-RINGTONE") or setting("ringtone", DEFAULT_RINGTONE)
+        if tone == "silent":
+            return
+        if not os.access(tone, os.R_OK):
+            tone = DEFAULT_RINGTONE
+        self.ringing = True
+        self.gen += 1
+        if setting("tts_calls", "off") == "on":
+            self.thread = threading.Thread(target=self.speak_and_ring,
+                                           args=(tone, spoken_who(number), self.gen),
+                                           daemon=True)
+            self.thread.start()
+        else:
+            self.play(tone)
+
+    def play(self, tone):
+        with self.lock:
+            if not self.ringing or self.p:
+                return
+            try:
+                self.p = subprocess.Popen(["s22-play", "-l", tone], stderr=subprocess.DEVNULL)
+            except OSError as e:
+                log("ringtone: %s" % e)
+
+    def quiet(self):
+        with self.lock:
+            p, self.p = self.p, None
+        if p:
+            p.terminate()
+            try:
+                p.wait(2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    def speak_and_ring(self, tone, name, gen):
+        def still():
+            return self.ringing and self.gen == gen
+        while still():
+            # Said, or stopped by off(); without s22-say, the ringtone alone
+            if say("wait Call from %s" % name, timeout=20) is None:
+                dbg("s22-say: not there")
+            if not still():
+                break
+            self.play(tone)
+            end = time.monotonic() + RING_SPELL
+            while still() and time.monotonic() < end:
+                time.sleep(0.1)
+            if self.gen == gen:
+                self.quiet()
+
+    def off(self):
+        if not self.ringing:
+            return
+        self.ringing = False
+        if self.thread:
+            say("stop", timeout=2)
+            self.thread = None
+        self.quiet()
+
+
+def sim_record(fid, rec, length):
+    """A record of a USIM file, as bytes, or None"""
+    try:
+        r = subprocess.run(["qmicli", "-d", QMI_DEV, "--uim-read-record=record-number=%d,"
+                            "record-length=%d,file=%s%s" % (rec, length, USIM, fid)],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = r.stdout.split("Read result:", 1)
+    if r.returncode or len(out) < 2:
+        return None
+    try:
+        return bytes.fromhex("".join(ch for ch in out[1] if ch in "0123456789abcdefABCDEF"))
+    except ValueError:
+        return None
+
+
+def sim_voicemail():
+    """The voicemail number from the SIM (EF_MBI, EF_MBDN), or "" """
+    mbi = sim_record("0x6FC9", 1, 4)
+    rec = mbi[0] if mbi and 0 < mbi[0] < 0xff else 1
+    b = sim_record("0x6FC7", rec, 24)
+    if not b or len(b) < 14:
+        return ""
+    n, ton, bcd = b[-14], b[-13], b[-12:-2]
+    if n in (0, 0xff):
+        return ""
+    digits = "".join("0123456789*#"[x] for byte in bcd[:n - 1]
+                     for x in (byte & 15, byte >> 4) if x < 12)
+    return ("+" if (ton & 0x70) == 0x10 else "") + digits
+
+
+def who(number):
+    return contact_name(number) or number or "unknown number"
+
+
+def clear_call_notes():
+    """Take down the ringing call's notification"""
+    try:
+        names = os.listdir(NOTIFY_DIR)
+    except OSError:
+        return
+    for n in names:
+        try:
+            with open(os.path.join(NOTIFY_DIR, n)) as f:
+                if "source=call\n" in f.read():
+                    os.unlink(os.path.join(NOTIFY_DIR, n))
+        except OSError:
+            pass
+
+
+def log_dir():
+    os.makedirs(LOG_DIR, mode=0o750, exist_ok=True)
+    try:
+        os.chown(LOG_DIR, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def log_call(c, result, seconds):
+    try:
+        log_dir()
+        new = not os.path.exists(LOG)
+        with open(LOG, "a") as f:
+            f.write("%d\t%s\t%s\t%s\t%d\n" % (int(c.get("first", time.time())),
+                                             c["dir"], c["number"], result, seconds))
+        if new:
+            os.chmod(LOG, 0o640)
+            try:
+                os.chown(LOG, 0, grp.getgrnam("wheel").gr_gid)
+            except (KeyError, OSError):
+                pass
+    except OSError as e:
+        log("call log: %s" % e)
+
+
+def tone_env():
+    """The sound server's loudspeaker node (with the voice in a call), our
+    streams named so Media leaves them alone; None without it"""
+    env = pipewire_env()
+    if env:
+        env["PIPEWIRE_PROPS"] = "{ application.name = s22-calld }"
+    return env
+
+
+class Ringback:
+    """The ringback tone with the voice path (Audio routes the card's media
+    playback there for the call)"""
+    CMD = "s22-ringback | aplay -q -t raw -f S16_LE -r 48000 -c 2 -D %s"
+
+    def __init__(self):
+        self.p = None
+
+    def on(self):
+        if self.p:
+            return
+        # Through the sound server when it runs, which holds the card
+        env = tone_env()
+        self.p = subprocess.Popen(self.CMD % ("pipewire" if env else "hw:0,0"), shell=True,
+                                  start_new_session=True, stderr=subprocess.DEVNULL, env=env)
+        dbg("ringback on")
+
+    def off(self):
+        if not self.p:
+            return
+        try:
+            os.killpg(self.p.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            self.p.wait(2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(self.p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        self.p = None
+        dbg("ringback off")
+
+
+DTMF_FREQS = {d: (r, c) for row, r in zip(("123", "456", "789", "*0#"), (697, 770, 852, 941))
+              for d, c in zip(row, (1209, 1336, 1477))}
+
+
+class Tones:
+    """A digit's DTMF tone with the voice, as it is sent: its row's and its
+    column's frequencies for DTMF_MS, at the ringback's level"""
+    LEVEL = 0.12
+    RATE = 48000
+
+    def __init__(self):
+        self.pcm = {}
+
+    def wave(self, digit):
+        if digit not in self.pcm:
+            r, c = DTMF_FREQS[digit]
+            n = self.RATE * DTMF_MS // 1000
+            ramp = self.RATE // 200
+            out = bytearray()
+            for i in range(n):
+                env = min(1.0, i / ramp, (n - 1 - i) / ramp)
+                v = self.LEVEL * env * (math.sin(2 * math.pi * r * i / self.RATE) +
+                                        math.sin(2 * math.pi * c * i / self.RATE))
+                out += struct.pack("<h", int(v * 32767))
+            self.pcm[digit] = bytes(out)
+        return self.pcm[digit]
+
+    def play(self, digit):
+        if digit not in DTMF_FREQS:
+            return
+        env = tone_env()
+        try:
+            p = subprocess.Popen(["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r",
+                                  str(self.RATE), "-c", "1", "-D",
+                                  "pipewire" if env else "hw:0,0"],
+                                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        except OSError as e:
+            log("tone: %s" % e)
+            return
+
+        def feed():
+            try:
+                p.stdin.write(self.wave(digit))
+                p.stdin.close()
+            except OSError:
+                pass
+            p.wait()
+        threading.Thread(target=feed, daemon=True).start()
+
+
+# ------------------------------------------------------------ other sound
+PULSE_SERVER = "unix:" + PIPEWIRE_DIR + "/pulse/native"
+OURS = ("s22-play", "s22-calld")        # application.name: ringtone, speech, tones
+
+
+def pactl(*args):
+    return subprocess.run(["pactl", *args], env=dict(os.environ, PULSE_SERVER=PULSE_SERVER),
+                          capture_output=True, text=True, timeout=5)
+
+
+def as_gui_user(*cmd):
+    """cmd in the GUI's session (its D-Bus), as the user who owns it"""
+    st = os.stat(PIPEWIRE_DIR)
+    env = dict(os.environ, XDG_RUNTIME_DIR=PIPEWIRE_DIR,
+               DBUS_SESSION_BUS_ADDRESS="unix:path=%s/bus" % PIPEWIRE_DIR)
+    return subprocess.run(list(cmd), env=env, user=st.st_uid, group=st.st_gid,
+                          extra_groups=[], capture_output=True, text=True, timeout=5)
+
+
+class Media:
+    """Other sound while a call rings (turned down) or has audio (muted,
+    players paused, new streams muted as they come), put back after. In a
+    thread of its own: set() returns at once"""
+    DUCK_DB = 12
+    # Pulse volumes are cubic (60% is -13 dB), so a cut in dB is this factor
+    DUCK = 10 ** (-DUCK_DB / 60)
+
+    def __init__(self):
+        self.want = self.mode = None
+        self.cv = threading.Condition()
+        self.lock = threading.RLock()
+        self.ducked = {}            # sink input -> its volumes before
+        self.muted = set()
+        self.paused = []            # MPRIS players
+        self.sub = None
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def set(self, mode):
+        """None, "duck" or "stop" """
+        with self.cv:
+            if mode != self.want:
+                self.want = mode
+                self.cv.notify()
+
+    def run(self):
+        while True:
+            with self.cv:
+                while self.want == self.mode:
+                    self.cv.wait()
+                mode = self.want
+            try:
+                self.apply(mode)
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
+                log("other sound: %s" % e)
+            self.mode = mode
+
+    def streams(self):
+        """(index, volumes, muted) of each stream not ours"""
+        try:
+            data = json.loads(pactl("-f", "json", "list", "sink-inputs").stdout or "[]")
+        except ValueError:
+            return []
+        out = []
+        for s in data:
+            p = s.get("properties", {})
+            if p.get("node.name", "").startswith("s22.") or p.get("application.name") in OURS:
+                continue
+            vols = [ch.get("value", 65536) for ch in s.get("volume", {}).values()]
+            out.append((s["index"], vols, s.get("mute", False)))
+        return out
+
+    def mute_all(self):
+        with self.lock:
+            for idx, _vols, muted in self.streams():
+                if not muted:
+                    pactl("set-sink-input-mute", str(idx), "1")
+                    self.muted.add(idx)
+
+    def watch(self, on):
+        """New streams muted as they come, while on"""
+        if on and not self.sub:
+            self.sub = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True,
+                                        env=dict(os.environ, PULSE_SERVER=PULSE_SERVER))
+            sub = self.sub
+
+            def read():
+                for line in sub.stdout:
+                    if "'new' on sink-input" in line and self.sub is sub:
+                        self.mute_all()
+            threading.Thread(target=read, daemon=True).start()
+        elif not on and self.sub:
+            sub, self.sub = self.sub, None
+            sub.terminate()
+            try:
+                sub.wait(2)
+            except subprocess.TimeoutExpired:
+                sub.kill()
+
+    def players(self, action):
+        """The MPRIS players playing paused (and kept), or those played"""
+        if action == "pause":
+            names = as_gui_user("playerctl", "-l").stdout.split()
+            for n in names:
+                if as_gui_user("playerctl", "-p", n, "status").stdout.strip() == "Playing":
+                    as_gui_user("playerctl", "-p", n, "pause")
+                    self.paused.append(n)
+        else:
+            for n in self.paused:
+                as_gui_user("playerctl", "-p", n, "play")
+            self.paused = []
+
+    def apply(self, mode):
+        if not os.path.exists(PIPEWIRE_DIR + "/pulse/native"):
+            return
+        if mode == "stop":
+            self.mute_all()             # at once; the players' pause after
+            self.watch(True)
+            self.players("pause")
+            log("other sound stopped (%d streams, players %s)" %
+                (len(self.muted), " ".join(self.paused) or "none"))
+        elif mode == "duck":
+            if self.mode == "stop":
+                return                  # still muted, a call ringing after one
+            with self.lock:
+                for idx, vols, _muted in self.streams():
+                    if idx not in self.ducked:
+                        self.ducked[idx] = vols
+                        pactl("set-sink-input-volume", str(idx),
+                              *[str(int(v * self.DUCK)) for v in vols])
+            dbg("other sound turned down (%d streams)" % len(self.ducked))
+        else:
+            self.watch(False)
+            with self.lock:
+                for idx in self.muted:
+                    pactl("set-sink-input-mute", str(idx), "0")
+                for idx, vols in self.ducked.items():
+                    pactl("set-sink-input-volume", str(idx), *[str(v) for v in vols])
+                back = len(self.muted) + len(self.ducked)
+                self.muted, self.ducked = set(), {}
+            self.players("play")
+            if back:
+                log("other sound back (%d streams)" % back)
+
+
+# ------------------------------------------------------------------ input
+def find_inputs():
+    """(vibrator fd, [key/switch fds]) from /dev/input"""
+    vib, keys = None, []
+    for n in sorted(os.listdir("/dev/input")):
+        if not n.startswith("event"):
+            continue
+        try:
+            fd = os.open("/dev/input/" + n, os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            continue
+        name = bytearray(64)
+        try:
+            fcntl.ioctl(fd, (2 << 30) | (64 << 16) | (ord("E") << 8) | 0x06, name)
+        except OSError:
+            pass
+        name = name.split(b"\0")[0].decode(errors="replace")
+        ff = bytearray(16)
+        try:
+            fcntl.ioctl(fd, (2 << 30) | (16 << 16) | (ord("E") << 8) | (0x20 + EV_FF), ff)
+        except OSError:
+            pass
+        if vib is None and ff[0x50 // 8] & (1 << (0x50 % 8)):          # FF_RUMBLE
+            vib = fd
+        elif name in ("pm8941_pwrkey", "GPIO Buttons", "S22 Flip keypad (T9)"):
+            keys.append(fd)
+            dbg("input %s: %s" % (n, name))
+        else:
+            os.close(fd)
+    return vib, keys
+
+
+class Ringer:
+    """Repeating vibration through an FF_RUMBLE effect"""
+    def __init__(self, fd):
+        self.fd, self.id = fd, -1
+
+    def pulse(self, ms, strength=100):
+        if self.fd is None:
+            return
+        # struct ff_effect (arm64, 48 bytes): type, id, direction,
+        # trigger{button, interval}, replay{length, delay}, 2 bytes padding,
+        # then the union (8-byte aligned, 32 bytes): rumble{strong, weak}
+        mag = 0xffff * max(0, min(100, strength)) // 100
+        eff = struct.pack("<HhHHHHH2xHH", 0x50, self.id, 0, 0, 0, ms, 0, mag, 0) + b"\0" * 28
+        buf = bytearray(eff)
+        try:
+            fcntl.ioctl(self.fd, (1 << 30) | (len(eff) << 16) | (ord("E") << 8) | 0x80, buf)
+            self.id = struct.unpack_from("<h", buf, 2)[0]
+            os.write(self.fd, struct.pack("<qqHHi", 0, 0, EV_FF, self.id, 1))
+        except OSError as e:
+            dbg("vibrate: %s" % e)
+
+
+# ------------------------------------------------------------------ main
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(client, name, inp, timeout=30):
+        out = wait(lambda cb: getattr(client, name)(inp, timeout, None, cb),
+                   getattr(client, name + "_finish"))
+        out.get_result()
+        return out
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb), dev.open_finish)
+    voice = wait(lambda cb: dev.allocate_client(Qmi.Service.VOICE, 0, 10, None, cb),
+                 dev.allocate_client_finish)
+    i = Qmi.MessageVoiceIndicationRegisterInput()
+    i.set_call_notification_events(True)
+    try:
+        req(voice, "indication_register", i)
+    except GLib.Error as e:
+        log("indication register: %s" % e.message)
+
+    audio = Audio()
+    mix(MEDIA_SPEAKER)          # a call's routing left by a restart: undone
+    ringback = Ringback()
+    tones = Tones()
+    media = Media()
+    ringtone = Ringtone()
+    vib, keys = find_inputs()
+    ringer = Ringer(vib)
+    calls = {}                 # id -> {"state", "dir", "number", "first", "talk", ...}
+    st = {"ring_on": False, "mute": False, "near": False, "prox": None}
+
+    def prox_line(sock, _cond):
+        try:
+            data = sock.recv(4096).decode(errors="replace")
+        except OSError:
+            data = ""
+        if not data:                        # s22-sensord went away
+            st["prox"][0].close()
+            st["prox"] = None
+            if st["near"]:
+                st["near"] = False
+                write_state()
+            return False
+        for line in data.splitlines():
+            p = line.split()
+            if len(p) >= 2 and p[0] == "proximity":
+                near = p[1] == "1"
+                if near != st["near"]:
+                    st["near"] = near
+                    write_state()
+        return True
+
+    def prox_on():
+        """Hold the proximity sensor while a call has audio"""
+        if st["prox"]:
+            return
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(SENSORD)
+            s.sendall(b"proximity\n")
+        except OSError as e:
+            log("proximity: %s" % e)
+            s.close()
+            return
+        st["prox"] = (s, GLib.io_add_watch(s.fileno(), GLib.IO_IN | GLib.IO_HUP,
+                                           lambda *_: prox_line(s, _)))
+        dbg("proximity held")
+
+    def prox_off():
+        if st["prox"]:
+            s, src = st["prox"]
+            st["prox"] = None
+            try:
+                GLib.source_remove(src)
+            except Exception:
+                pass
+            s.close()
+        if st["near"]:
+            st["near"] = False
+            write_state()
+
+    def write_state():
+        if not os.path.isdir(STATE_DIR):       # callers' numbers: wheel only
+            os.makedirs(STATE_DIR, mode=0o750)
+            try:
+                os.chown(STATE_DIR, 0, grp.getgrnam("wheel").gr_gid)
+            except (KeyError, OSError):
+                pass
+        text = "".join("call %d %s %s %d %s\n" % (
+            cid, c["dir"], c["state"], int(c.get("talk") or c.get("first", 0)),
+            c["number"] or "-") for cid, c in sorted(calls.items()))
+        # On the speaker it is not at the ear, whatever the sensor says
+        text += "mute=%d\nnear=%d\nspeaker=%d\n" % (
+            st["mute"], st["near"] and not audio.speaker, audio.speaker)
+        try:
+            with open(STATE + ".new", "w") as f:
+                f.write(text)
+            os.replace(STATE + ".new", STATE)
+        except OSError as e:
+            log("state: %s" % e)
+
+    def ended(cid, c):
+        talk = int(time.time() - c["talk"]) if c.get("talk") else 0
+        if c["dir"] == "mo":
+            result = "outgoing" if c.get("talk") else "unanswered"
+        else:
+            result = "answered" if c.get("talk") else \
+                "rejected" if c.get("rejected") else "missed"
+        log_call(c, result, talk)
+        if result == "missed":
+            subprocess.run(["s22-notify", "-s", "missed-call", "-o", "call:recents",
+                            "-f", c["number"] or "",
+                            "Missed call from %s" % who(c["number"])])
+
+    def numbers_of(out):
+        nums = {}
+        try:
+            for e in out.get_remote_party_number():
+                n = getattr(e, "type", None)
+                nums[e.id] = n if isinstance(n, str) else ""
+        except (GLib.Error, AttributeError, TypeError):
+            pass
+        return nums
+
+    def update(out):
+        nums = numbers_of(out)
+        try:
+            info = out.get_call_information()
+        except GLib.Error:
+            return
+        for c in info:
+            state = Qmi.VoiceCallState(c.state).value_nick
+            old = calls.get(c.id, {})
+            prev = old.get("state")
+            cur = dict(old)
+            cur.update(state=state, dir=Qmi.VoiceCallDirection(c.direction).value_nick,
+                       number=nums.get(c.id) or old.get("number", ""))
+            cur.setdefault("first", time.time())
+            if state == "conversation" and not cur.get("talk"):
+                cur["talk"] = time.time()
+            calls[c.id] = cur
+            if state in ("origination", "cc-in-progress") and state != prev:
+                # Connected or ended well within a minute; else ask the modem
+                cid, since = c.id, cur["first"]
+                GLib.timeout_add_seconds(STUCK_CALL_S, lambda: (
+                    calls.get(cid, {}).get("first") == since and
+                    calls[cid]["state"] in ("origination", "cc-in-progress") and
+                    reconcile("stuck dialling")) and False)
+            if state != prev:
+                log("call %d %s: %s" % (c.id, cur["dir"], state))
+                if state == "incoming":
+                    subprocess.run(["s22-notify", "-s", "call", "-o", "call:incoming",
+                                    "Incoming call: %s" % who(cur["number"])])
+                elif prev in ("incoming", "waiting"):
+                    clear_call_notes()
+            if state in ("end",):
+                ended(c.id, calls.pop(c.id))
+        if not calls:
+            st["mute"] = False
+        react()
+        write_state()
+
+    def react():
+        states = {c["state"] for c in calls.values()}
+        if any(c["dir"] == "mo" and c["state"] == "alerting" for c in calls.values()):
+            ringback.on()
+        else:
+            ringback.off()
+        if states & {"conversation", "hold", "alerting", "origination", "cc-in-progress"}:
+            audio.on()
+            prox_on()
+        elif not states - {"incoming", "waiting"}:
+            audio.off()
+            prox_off()
+        ringing = [c for c in calls.values() if c["state"] == "incoming"]
+        media.set("stop" if audio.procs else "duck" if ringing else None)
+        if not ringing:
+            st["silenced"] = False
+        st["ring_on"] = bool(ringing) and not st.get("silenced")
+        if st["ring_on"]:
+            ringtone.on(ringing[0]["number"])
+            if "ring_vibrate" in st:
+                st["ring_vibrate"](ringing[0]["number"])
+        else:
+            ringtone.off()
+
+    def ringing_id():
+        for cid, c in calls.items():
+            if c["state"] in ("incoming", "waiting"):
+                return cid
+        return None
+
+    def active_id():
+        for cid, c in calls.items():
+            if c["state"] not in ("end", "incoming", "waiting"):
+                return cid
+        return ringing_id()
+
+    def answer():
+        cid = ringing_id()
+        if cid is None:
+            return "no ringing call"
+        i = Qmi.MessageVoiceAnswerCallInput()
+        i.set_call_id(cid)
+        try:
+            req(voice, "answer_call", i)
+            return "answered call %d" % cid
+        except GLib.Error as e:
+            return "answer: %s" % e.message
+
+    def reject():
+        cid = ringing_id()
+        if cid is None:
+            return "no ringing call"
+        calls[cid]["rejected"] = True
+        i = Qmi.MessageVoiceEndCallInput()
+        i.set_call_id(cid)
+        try:
+            req(voice, "end_call", i)
+            return "rejected call %d" % cid
+        except GLib.Error as e:
+            return "reject: %s" % e.message
+
+    def dtmf(digit):
+        cid = None
+        for k, c in calls.items():
+            if c["state"] == "conversation":
+                cid = k
+        if cid is None or len(digit) != 1 or digit not in "0123456789*#":
+            return "no call to send it to"
+        i = Qmi.MessageVoiceStartContinuousDtmfInput()
+        i.set_data(cid, ord(digit))
+        try:
+            req(voice, "start_continuous_dtmf", i)
+        except GLib.Error as e:
+            return "dtmf: %s" % e.message
+
+        def stop():
+            j = Qmi.MessageVoiceStopContinuousDtmfInput()
+            j.set_data(cid)
+            try:
+                req(voice, "stop_continuous_dtmf", j)
+            except GLib.Error as e:
+                dbg("dtmf stop: %s" % e.message)
+            return False
+        GLib.timeout_add(DTMF_MS, stop)
+        tones.play(digit)
+        return "ok"
+
+    def speaker(how):
+        if not audio.procs:
+            return "no call"
+        audio.route(not audio.speaker if how == "toggle" else how == "on")
+        write_state()
+        return "speaker" if audio.speaker else "earpiece"
+
+    def mute(on):
+        if not audio.procs:
+            return "no call"
+        st["mute"] = on
+        cset(MUTE_CTL, "0" if on else "1")
+        write_state()
+        return "muted" if on else "unmuted"
+
+    def reconcile(why):
+        """Calls the modem no longer has, ended here too: a dial it refused
+        after reporting the call (cc-in-progress, then IncompatibleState in
+        limited service) never got an end, and the End key could not clear
+        it (InvalidQosId)"""
+        try:
+            out = req(voice, "get_all_call_info", None)
+            try:
+                have = {c.id for c in out.get_call_information()}
+            except GLib.Error:
+                have = set()        # no calls at all
+        except GLib.Error as e:
+            log("call list (%s): %s" % (why, e.message))
+            return
+        gone = [cid for cid in calls if cid not in have]
+        for cid in gone:
+            log("call %d: the modem has no such call (%s)" % (cid, why))
+            ended(cid, calls.pop(cid))
+        if gone:
+            if not calls:
+                st["mute"] = False
+            react()
+            write_state()
+        return gone
+
+    def hangup():
+        cid = active_id()
+        if cid is None:
+            return "no call"
+        if calls[cid]["state"] in ("incoming", "waiting"):
+            calls[cid]["rejected"] = True
+        i = Qmi.MessageVoiceEndCallInput()
+        i.set_call_id(cid)
+        try:
+            req(voice, "end_call", i)
+            return "ended call %d" % cid
+        except GLib.Error as e:
+            if cid in (reconcile("end refused") or []):
+                return "ended call %d (the modem had no such call)" % cid
+            return "end: %s" % e.message
+
+    def dial(number):
+        if not number or any(ch not in "+0123456789*#" for ch in number):
+            return "bad number"
+        i = Qmi.MessageVoiceDialCallInput()
+        i.set_calling_number(number)
+        try:
+            out = req(voice, "dial_call", i)
+            return "dialling (call %s)" % (out.get_call_id() if hasattr(out, "get_call_id") else "?")
+        except GLib.Error as e:
+            reconcile("dial refused")
+            return "dial: %s" % e.message
+
+    def voicemail():
+        num = st.get("voicemail", "")
+        return dial(num) if num else "no voicemail number on the SIM"
+
+    def status():
+        if not calls:
+            return "no calls"
+        return "\n".join("%d %s %s %s" % (cid, c["dir"], c["state"], c["number"])
+                         for cid, c in sorted(calls.items()))
+
+    voice.connect("all-call-status", lambda _c, out: update(out))
+
+    # Key and lid events
+    def on_input(fd, _cond):
+        while True:
+            try:
+                ev = os.read(fd, 24)
+            except BlockingIOError:
+                break
+            if len(ev) < 24:
+                break
+            _s, _u, typ, code, val = struct.unpack("<qqHHi", ev)
+            if typ == EV_KEY and val == 1:
+                if code == SPEAKER_KEY and audio.procs:
+                    log("speaker key: %s" % speaker("toggle"))
+                elif code == KEY_ENTER and ringing_id() is not None:
+                    log("Call key: %s" % answer())
+                elif code == KEY_POWER and calls:
+                    log("End key: %s" % hangup())
+            elif typ == EV_SW and code == SW_LID and LID_ACTIONS:
+                if val == 0 and ringing_id() is not None:
+                    log("lid opened: %s" % answer())
+                elif val == 1 and calls:
+                    log("lid closed: %s" % hangup())
+        return True
+
+    for fd in keys:
+        GLib.io_add_watch(fd, GLib.IO_IN, on_input)
+
+    # Control socket
+    try:
+        os.unlink(SOCK)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    os.chmod(SOCK, 0o660)
+    try:
+        os.chown(SOCK, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    srv.listen(4)
+
+    def on_client(_fd, _cond):
+        conn, _ = srv.accept()
+        try:
+            words = conn.recv(256).decode(errors="replace").split()
+            cmd = words[0] if words else ""
+            if cmd == "dial" and len(words) == 2:
+                reply = dial(words[1])
+            elif cmd == "answer":
+                reply = answer()
+            elif cmd == "hangup":
+                reply = hangup()
+            elif cmd == "reject":
+                reply = reject()
+            elif cmd == "voicemail":
+                reply = voicemail()
+            elif cmd == "silence":
+                st["silenced"] = ringing_id() is not None
+                react()
+                reply = "silenced" if st["silenced"] else "no ringing call"
+            elif cmd == "dtmf" and len(words) == 2:
+                reply = dtmf(words[1])
+            elif cmd == "mute" and len(words) == 2 and words[1] in ("on", "off"):
+                reply = mute(words[1] == "on")
+            elif cmd == "speaker" and len(words) == 2 and words[1] in ("on", "off", "toggle"):
+                reply = speaker(words[1])
+            elif cmd == "status":
+                reply = status()
+            else:
+                reply = ("usage: dial NUMBER | voicemail | answer | hangup | reject | "
+                         "dtmf DIGIT | mute on|off | status")
+            if cmd not in ("dtmf", "status"):   # no numbers or tones in the log
+                log("%s -> %s" % (cmd, reply.splitlines()[0] if reply else ""))
+            conn.sendall((reply + "\n").encode())
+        finally:
+            conn.close()
+        return True
+
+    GLib.io_add_watch(srv.fileno(), GLib.IO_IN, on_client)
+
+    def tick():
+        audio.check()
+        return True
+
+    GLib.timeout_add(1500, tick)
+
+    # The ring vibration: one step of the pattern at a time, while it rings
+    def ring_steps(number):
+        if setting("vibrate", "on") == "off":
+            return []
+        for v in (contact_field(number, "X-S22-CALLVIB"), setting("vib_ring", ""), RING):
+            if v and v != "default":
+                if v == "none":
+                    return []
+                try:
+                    steps = [max(0, min(5000, int(x))) for x in v.split(",")][:16]
+                except ValueError:
+                    continue
+                if len(steps) % 2:
+                    steps.append(600)   # a pause before it comes round again
+                if sum(steps) >= 200:
+                    return steps
+        return []
+
+    def ring_step():
+        if not st["ring_on"] or not st.get("ring_steps"):
+            st["ring_timer"] = 0
+            return False
+        i = st["ring_i"] % len(st["ring_steps"])
+        ms = st["ring_steps"][i]
+        if i % 2 == 0 and ms:
+            ringer.pulse(ms, st["ring_pct"])
+        st["ring_i"] += 1
+        st["ring_timer"] = GLib.timeout_add(max(ms, 20), ring_step)
+        return False
+
+    def ring_vibrate(number):
+        if st.get("ring_timer"):
+            return
+        st["ring_steps"] = ring_steps(number)
+        try:
+            st["ring_pct"] = max(1, min(15, int(setting("vib_strength", 15)))) * 100 // 15
+        except ValueError:
+            st["ring_pct"] = 100
+        st["ring_i"] = 0
+        ring_step()
+    st["ring_vibrate"] = ring_vibrate
+
+    loop = GLib.MainLoop()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: loop.quit() or False)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: loop.quit() or False)
+    dev.connect("device-removed", lambda *_: loop.quit())
+    write_state()
+    def read_voicemail():
+        """The SIM's mailbox number; at boot the SIM may not answer yet, so
+        again a minute later, a few times"""
+        st["voicemail"] = sim_voicemail()
+        try:
+            with open(VOICEMAIL + ".new", "w") as f:
+                f.write(st["voicemail"] + "\n")
+            os.replace(VOICEMAIL + ".new", VOICEMAIL)
+        except OSError as e:
+            log("voicemail: %s" % e)
+        st["vm_tries"] = st.get("vm_tries", 0) + 1
+        if st["voicemail"]:
+            log("voicemail number found on the SIM")
+        elif st["vm_tries"] < 10:
+            GLib.timeout_add_seconds(60, lambda: read_voicemail() and False)
+        else:
+            log("voicemail number not on the SIM")
+        return False
+
+    read_voicemail()
+    try:
+        log_dir()
+    except OSError as e:
+        log("call log: %s" % e)
+    log("ready (lid answers and hangs up: %s)" % ("yes" if LID_ACTIONS else "no"))
+    try:
+        loop.run()
+    finally:
+        ringtone.off()
+        ringback.off()
+        audio.off()
+        try:
+            os.unlink(SOCK)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

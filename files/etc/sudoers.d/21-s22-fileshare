@@ -1,0 +1,3 @@
+# File sharing from Settings (D056): the helper switches the service and sets
+# the SMB password, and only after checking the user's own login password.
+%wheel ALL=(root) NOPASSWD: /usr/local/bin/s22-fileshare

@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Incoming text messages -> /var/lib/s22-sms/inbox and notifications,
+# by s22-smsd (D025). Puts the modem online; never starts mobile data.
+
+description="Text messages into the inbox and notifications"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-smsd
+command_args="${SMSD_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-smsd.log
+error_log=/var/log/s22-smsd.log
+
+depend() {
+	need rmtfs s22-notifyd
+	after tqftpserv
+}

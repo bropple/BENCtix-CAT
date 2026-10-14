@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-sensor: hold sensors from s22-sensord and print their readings.
+
+  s22-sensor NAME[:HZ] ...     stream until interrupted (Ctrl-C)
+  s22-sensor -n COUNT NAME ... stop after COUNT readings
+  s22-sensor -s                which sensors run, at what rate, for how many
+
+NAME is accel, proximity, light or pressure. A sensor runs only while some
+client holds it (see s22-sensord); this one releases its sensors on exit.
+"""
+import getopt, socket, sys
+
+SOCK = "/run/s22-sensord.sock"
+
+def main():
+    count, status = 0, False
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "n:sh")
+    except getopt.GetoptError as e:
+        sys.exit("s22-sensor: %s" % e)
+    for o, a in opts:
+        if o == "-n":
+            count = int(a)
+        elif o == "-s":
+            status = True
+        else:
+            print(__doc__.strip())
+            return 0
+    if not status and not args:
+        sys.exit("usage: s22-sensor [-n COUNT] NAME[:HZ] ... | s22-sensor -s")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+    except OSError as e:
+        sys.exit("s22-sensor: %s: %s" % (SOCK, e))
+    f = s.makefile("r")
+    if status:
+        s.sendall(b"status\n")
+        s.shutdown(socket.SHUT_WR)
+        for line in f:
+            print(line.split(" ", 1)[1].rstrip())
+        return 0
+    for a in args:
+        name, _, hz = a.partition(":")
+        s.sendall(("%s %s\n" % (name, hz)).encode())
+    n = 0
+    try:
+        for line in f:
+            if line.startswith("error "):
+                sys.exit("s22-sensor: " + line[6:].strip())
+            print(line.rstrip(), flush=True)
+            n += 1
+            if count and n >= count:
+                break
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

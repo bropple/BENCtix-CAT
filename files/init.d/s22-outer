@@ -1,0 +1,75 @@
+#!/sbin/openrc-run
+# The outer 128x128 display: a known state at boot and shutdown (black,
+# backlight off). Until a status screen exists it would otherwise keep the
+# bootloader's carrier splash.
+#
+# panel-mipi-dbi is built in and probes before the root filesystem holds its
+# init sequence (cat,s22flip-ext-panel.bin), so it fails and never retries;
+# bind it again here.
+
+description="Outer display: black, backlight off"
+
+DRV=/sys/bus/spi/drivers/panel-mipi-dbi-spi
+
+depend() {
+	need localmount
+	after udev-trigger
+}
+
+outer_fb() {
+	local fb
+	for fb in /sys/class/graphics/fb*; do
+		[ "$(cat "$fb/name" 2>/dev/null)" = panel-mipi-dbid ] && { echo "${fb##*/}"; return 0; }
+	done
+	return 1
+}
+
+outer_spi() {
+	local d
+	for d in /sys/bus/spi/devices/*; do
+		grep -q 'cat,s22flip-ext-panel' "$d/of_node/compatible" 2>/dev/null && { echo "${d##*/}"; return 0; }
+	done
+	return 1
+}
+
+# Fill the framebuffer with zeros (black in RGB565)
+black() {
+	local fb=$1 w h bpp
+	IFS=, read -r w h < "/sys/class/graphics/$fb/virtual_size"
+	bpp=$(cat "/sys/class/graphics/$fb/bits_per_pixel")
+	head -c $((w * h * bpp / 8)) /dev/zero > "/dev/$fb"
+}
+
+backlight_off() {
+	[ -e /sys/class/backlight/ext-backlight ] || return 0
+	echo 0 > /sys/class/backlight/ext-backlight/brightness
+}
+
+start() {
+	ebegin "Setting the outer display to black"
+	local fb spi i
+	if ! fb=$(outer_fb); then
+		spi=$(outer_spi) || { eend 1 "no outer panel on SPI"; return 1; }
+		[ -e "$DRV/$spi" ] || echo "$spi" > "$DRV/bind" 2>/dev/null
+		for i in $(seq 20); do
+			fb=$(outer_fb) && break
+			sleep 0.25
+		done
+	fi
+	[ -n "$fb" ] || { eend 1 "outer panel did not come up"; return 1; }
+	# Unblanking enables the pipeline; nothing else modesets this panel
+	echo 0 > "/sys/class/graphics/$fb/blank"
+	black "$fb"
+	backlight_off
+	eend 0
+}
+
+stop() {
+	ebegin "Setting the outer display to black"
+	local fb
+	if fb=$(outer_fb); then
+		black "$fb"
+	fi
+	backlight_off
+	eend 0
+}

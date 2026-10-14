@@ -1,0 +1,12 @@
+#!/bin/sh
+# BENCtix-CAT: power off or reboot, for the GUI's power menu (D043). Run
+# through sudo: group wheel may run this, and only this, without a password
+# (/etc/sudoers.d/20-s22-power).
+#   s22-power off | reboot | lk2nd    (lk2nd: its fastboot, reboot-lk2nd)
+set -eu
+case "${1:-}" in
+off)	exec poweroff ;;
+reboot)	exec reboot ;;
+lk2nd)	exec /usr/local/bin/reboot-lk2nd ;;
+*)	echo "usage: s22-power off | reboot | lk2nd" >&2; exit 2 ;;
+esac

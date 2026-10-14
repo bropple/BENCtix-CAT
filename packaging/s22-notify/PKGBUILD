@@ -1,0 +1,35 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Notifications (D024): s22-notify posts them, s22-notifyd vibrates with a
+# per-source pattern; the charger's sound (D073). The OpenRC service is in
+# files/init.d.
+
+pkgname=s22-notify
+pkgver=0.9
+pkgrel=2
+pkgdesc="Cat S22 Flip: notifications (s22-notify), their vibration and sound (s22-notifyd), s22-play, the charger's sound"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(glibc alsa-lib libvorbis util-linux)
+makedepends=(python)
+backup=(var/lib/s22-notify/vibrate)
+source=(s22-notifyd.c s22-notify s22-play.c s22-vibrate.c vibrate s22-charge-sound
+	70-s22-charge.rules charge-tones.py)
+sha256sums=(SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-notifyd s22-notifyd.c
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-play s22-play.c -lvorbisfile -lasound
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-vibrate s22-vibrate.c
+	python3 charge-tones.py .
+}
+
+package() {
+	install -Dm755 s22-notifyd "$pkgdir/usr/bin/s22-notifyd"
+	install -Dm755 s22-notify "$pkgdir/usr/bin/s22-notify"
+	install -Dm755 s22-play "$pkgdir/usr/bin/s22-play"
+	install -Dm755 s22-vibrate "$pkgdir/usr/bin/s22-vibrate"
+	install -Dm644 vibrate "$pkgdir/var/lib/s22-notify/vibrate"
+	install -Dm755 s22-charge-sound "$pkgdir/usr/bin/s22-charge-sound"
+	install -Dm644 70-s22-charge.rules "$pkgdir/usr/lib/udev/rules.d/70-s22-charge.rules"
+	install -Dm644 -t "$pkgdir/usr/share/sounds/s22" charging-started.wav charging-stopped.wav
+}

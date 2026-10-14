@@ -1,0 +1,6 @@
+# s22-calld options: -v log every step, -L the lid neither answers nor ends
+CALL_ARGS=
+# Microphone gain during a call: ADC1 analog, 6 dB steps (0-8); TX1 digital,
+# 84 = 0 dB, 1 dB steps
+CALL_MIC_ADC=4
+CALL_MIC_DIGITAL=88

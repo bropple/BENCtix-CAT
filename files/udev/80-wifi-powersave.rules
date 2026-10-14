@@ -1,0 +1,4 @@
+# WiFi power save off (D019): with it on, wcn36xx's firmware power save held
+# packets for up to a second (ping to the router ~0.8 s) and halved
+# throughput. Costs some battery while WiFi is associated.
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/bin/iw dev %k set power_save off"

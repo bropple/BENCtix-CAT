@@ -1,0 +1,23 @@
+Shell
+- A terminal like the text console, with tabs along the top. Typing works as in Typing.
+Home held	Tab (for completion).
+Recents	Ctrl for the next key (Recents, C is Ctrl+C).
+Recents held	Ctrl+C twice: quits Claude Code and others that ask twice.
+Back	Esc.
+
+# Tabs
+Recents, Right	Next tab.
+Recents, Left	Previous tab.
+Recents, Up	A new tab, in the same folder.
+exit	Close the tab (the last one closes the Shell).
+- Tap a tab to switch to it, or the + for a new one.
+- Home leaves the Shell running. If it is ever closed, it comes back to the same tabs.
+
+# Copy and paste
+Recents, Down	Select mode: the arrows move, 0 starts the selection, OK copies it, Back leaves.
+Recents, V	Paste (V is 8 three times).
+- Or press and hold, then drag, to select with a finger; lifting copies.
+- Copies go to the phone's clipboard; wl-copy and wl-paste work in commands too.
+
+# Scrolling back
+- Drag up and down to scroll through what has gone by.

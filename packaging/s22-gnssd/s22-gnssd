@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-gnssd: GPS from the modem's location engine, while something asks.
+
+The modem's engine (QMI LOC over QRTR) receives GPS and GLONASS; it needs
+the host's QMI memshare service, in the kernel since 7.1.3-44 (D078). It
+only receives: nothing goes over the cellular network. A session (fixes
+every second) runs only while a client holds it, so the receiver is off
+the rest of the time (D079):
+
+  a client of CTL (root:wheel 0660) sending "hold NAME" starts it, and gets
+  a line "ok" back, then STATE's lines every time a report comes, each
+  block ended by an empty line; "nmea NAME" holds it too, and gets the
+  engine's NMEA sentences instead. Closing the connection releases the
+  hold; when the last one goes the session stops.
+
+A LOC session lives as long as the QMI client that started it, so the
+daemon keeps one client for its life. STATE (root:wheel 0640, as it holds
+the phone's position) is key=value lines:
+
+  session=on|off
+  fix=gnss|cell|none     satellites, a cell-ID guess (kilometres), nothing yet
+  lat=, lon=             degrees (WGS84), alt= metres above sea level
+  acc_m=                 horizontal uncertainty (circular), metres
+  speed=, heading=       m/s and degrees, when the engine gives them
+  sats_used=             satellites in the fix, sats_view= in view (GPS + GLONASS)
+  time=                  the fix's UTC time, seconds since the epoch
+
+Kept after the session stops, with session=off, so the last position stays
+readable. ACTIVE (0644, no position) has only the first two lines, and is
+written only when they change: the status bar's location arrow.
+
+  s22-gnssd [-v]
+"""
+import os, signal, socket, sys, time
+
+STATE_DIR = "/run/s22-gnss"
+STATE = STATE_DIR + "/state"
+ACTIVE = STATE_DIR + "/active"
+CTL = STATE_DIR + "/ctl"
+SESSION_ID = 1
+TECH_SATELLITE = 1      # technology_used bits (libqmi QmiLocTechnologyUsed)
+verbose = "-v" in sys.argv[1:]
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%S"), "s22-gnssd:", *a, file=sys.stderr, flush=True)
+
+
+def dbg(*a):
+    if verbose:
+        log(*a)
+
+
+def wheel_gid():
+    try:
+        import grp
+        return grp.getgrnam("wheel").gr_gid
+    except KeyError:
+        return 0
+
+
+def state_text(st):
+    keys = ("session", "fix", "lat", "lon", "alt", "acc_m", "speed", "heading",
+            "sats_used", "sats_view", "time")
+    return "".join("%s=%s\n" % (k, st.get(k, "")) for k in keys)
+
+
+last_active = None
+
+
+def write_state(st):
+    global last_active
+    active = "session=%s\nfix=%s\n" % (st.get("session", ""), st.get("fix", ""))
+    if active != last_active:
+        try:
+            with open(ACTIVE + ".new", "w") as f:
+                os.fchmod(f.fileno(), 0o644)
+                f.write(active)
+            os.replace(ACTIVE + ".new", ACTIVE)
+            last_active = active
+        except OSError as e:
+            log("active: %s" % e)
+    try:
+        with open(STATE + ".new", "w") as f:
+            os.fchown(f.fileno(), 0, wheel_gid())
+            os.fchmod(f.fileno(), 0o640)
+            f.write(state_text(st))
+        os.replace(STATE + ".new", STATE)
+    except OSError as e:
+        log("state: %s" % e)
+
+
+def main():
+    import gi
+    gi.require_version("Qmi", "1.0")
+    gi.require_version("Qrtr", "1.0")
+    from gi.repository import GLib, Qmi, Qrtr
+
+    ctx = GLib.MainContext.default()
+
+    def wait(start, finish):
+        box = []
+        start(lambda _s, res, *_: box.append(res))
+        while not box:
+            ctx.iteration(True)
+        return finish(box[0])
+
+    def req(name, inp, timeout=10):
+        out = wait(lambda cb: getattr(loc, name)(inp, timeout, None, cb),
+                   getattr(loc, name + "_finish"))
+        out.get_result()
+        return out
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.chown(STATE_DIR, 0, wheel_gid())
+    os.chmod(STATE_DIR, 0o755)        # STATE itself is 0640
+
+    bus = wait(lambda cb: Qrtr.Bus.new(1000, None, cb), Qrtr.Bus.new_finish)
+    while True:
+        try:
+            node = wait(lambda cb: bus.wait_for_node(0, 30000, None, cb),
+                        bus.wait_for_node_finish)
+            break
+        except GLib.Error:
+            dbg("waiting for the modem")
+    dev = wait(lambda cb: Qmi.Device.new_from_node(node, None, cb),
+               Qmi.Device.new_from_node_finish)
+    wait(lambda cb: dev.open(Qmi.DeviceOpenFlags(0), 15, None, cb), dev.open_finish)
+    loc = wait(lambda cb: dev.allocate_client(Qmi.Service.LOC, 0, 10, None, cb),
+               dev.allocate_client_finish)
+
+    F = Qmi.LocEventRegistrationFlag
+    inp = Qmi.MessageLocRegisterEventsInput()
+    inp.set_event_registration_mask(F.POSITION_REPORT | F.NMEA | F.ENGINE_STATE |
+                                    F.FIX_SESSION_STATE)
+    req("register_events", inp)
+
+    st = {"session": "off", "fix": "none"}
+    try:
+        with open(STATE) as f:          # the last position, across restarts
+            for line in f:
+                k, _, v = line.rstrip("\n").partition("=")
+                st[k] = v
+        st["session"] = "off"
+    except OSError:
+        pass
+    write_state(st)
+    clients = {}        # fd -> [socket, name, kind]; kind None until it asks
+    views = {}          # NMEA talker (GP, GL) -> satellites in view
+
+    def send(fd, text):
+        try:
+            clients[fd][0].sendall(text.encode())
+        except OSError:
+            pass        # gone: its watch drops it
+
+    def broadcast(kind, text):
+        for fd, c in list(clients.items()):
+            if c[2] == kind:
+                send(fd, text)
+
+    def held():
+        return any(c[2] for c in clients.values())
+
+    def session(on):
+        if (st["session"] == "on") == on:
+            return
+        try:
+            if on:
+                s = Qmi.MessageLocStartInput()
+                s.set_session_id(SESSION_ID)
+                s.set_fix_recurrence_type(Qmi.LocFixRecurrenceType.PERIODIC_FIXES)
+                s.set_intermediate_report_state(Qmi.LocIntermediateReportState.ENABLE)
+                s.set_minimum_interval_between_position_reports(1000)
+                req("start", s)
+            else:
+                s = Qmi.MessageLocStopInput()
+                s.set_session_id(SESSION_ID)
+                req("stop", s)
+        except GLib.Error as e:
+            log("session %s: %s" % ("start" if on else "stop", e.message))
+            if on:
+                return
+        st["session"] = "on" if on else "off"
+        if not on:
+            views.clear()
+        log("session %s" % st["session"])
+        write_state(st)
+
+    def get(ind, name):
+        try:
+            return getattr(ind, "get_" + name)()
+        except GLib.Error:
+            return None
+
+    def on_position(_c, ind):
+        status = get(ind, "session_status")
+        lat, lon = get(ind, "latitude"), get(ind, "longitude")
+        if lat is None or lon is None or status not in (
+                Qmi.LocSessionStatus.SUCCESS, Qmi.LocSessionStatus.IN_PROGRESS):
+            dbg("report without a position (%s)" % status)
+            return
+        tech = get(ind, "technology_used") or 0
+        st["fix"] = "gnss" if int(tech) & TECH_SATELLITE else "cell"
+        st["lat"], st["lon"] = "%.7f" % lat, "%.7f" % lon
+        for key, name, fmt in (("alt", "altitude_from_sealevel", "%.1f"),
+                               ("acc_m", "horizontal_uncertainty_circular", "%.1f"),
+                               ("speed", "horizontal_speed", "%.2f"),
+                               ("heading", "heading", "%.1f")):
+            v = get(ind, name)
+            st[key] = fmt % v if v is not None else ""
+        used = get(ind, "satellites_used")
+        st["sats_used"] = str(len(used)) if used is not None else ""
+        st["sats_view"] = str(sum(views.values())) if views else ""
+        t = get(ind, "utc_timestamp")
+        st["time"] = str(t // 1000) if t else ""
+        write_state(st)
+        broadcast("hold", state_text(st) + "\n")
+
+    def on_nmea(_c, ind):
+        s = (get(ind, "nmea_string") or "").strip()
+        if not s:
+            return
+        # $GPGSV,3,1,13,...: the third field is the satellites in view
+        f = s.split(",")
+        if len(f) > 3 and f[0][3:6] == "GSV" and f[3].isdigit():
+            views[f[0][1:3]] = int(f[3])
+        broadcast("nmea", s + "\r\n")
+
+    loc.connect("position-report", on_position)
+    loc.connect("nmea", on_nmea)
+    loc.connect("engine-state", lambda _c, ind: dbg("engine state %s" % get(ind, "engine_state")))
+
+    try:
+        os.unlink(CTL)
+    except OSError:
+        pass
+    ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ctl.bind(CTL)
+    ctl.listen(8)
+    os.chown(CTL, 0, wheel_gid())
+    os.chmod(CTL, 0o660)
+
+    def on_client(fd, cond):
+        c = clients[fd]
+        try:
+            data = c[0].recv(256) if cond & GLib.IO_IN else b""
+        except OSError:
+            data = b""
+        if data:
+            words = data.decode("utf-8", "replace").split()
+            if c[2] is None and words and words[0] in ("hold", "nmea"):
+                c[1] = " ".join(words[1:]) or "anonymous"
+                c[2] = words[0]
+                log("%s by %s" % (c[2], c[1]))
+                send(fd, "ok\n")
+                session(True)
+            return True
+        if c[2]:
+            log("%s by %s released" % (c[2], c[1]))
+        del clients[fd]
+        c[0].close()
+        if not held():
+            session(False)
+        return False
+
+    def on_ctl(*_):
+        conn, _ = ctl.accept()
+        clients[conn.fileno()] = [conn, None, None]
+        GLib.io_add_watch(conn.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, on_client)
+        return True
+    GLib.io_add_watch(ctl.fileno(), GLib.IO_IN, on_ctl)
+    log("ready")
+
+    loop = GLib.MainLoop()
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_signal = GLib.unix_signal_add
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda *_: loop.quit() or False)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, lambda *_: loop.quit() or False)
+    dev.connect("device-removed", lambda *_: (log("modem went away; exiting"), loop.quit()))
+    loop.run()
+    session(False)
+    try:
+        wait(lambda cb: dev.release_client(loc, Qmi.DeviceReleaseClientFlags.RELEASE_CID,
+                                           10, None, cb), dev.release_client_finish)
+    except GLib.Error:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

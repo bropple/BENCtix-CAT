@@ -1,0 +1,4 @@
+# Start the modem once rmtfs is ready (rmtfs -s). Empty to leave it off.
+RMTFS_START_MODEM=yes
+# Extra rmtfs options, e.g. -v
+RMTFS_ARGS=

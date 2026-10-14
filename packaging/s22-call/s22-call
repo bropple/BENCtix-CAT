@@ -1,0 +1,19 @@
+#!/bin/sh
+# s22-call: control voice calls through s22-calld (D028).
+#   s22-call dial NUMBER | voicemail | answer | hangup | reject | dtmf DIGIT | mute on|off | status
+usage="usage: s22-call dial NUMBER | voicemail | answer | hangup | reject | dtmf DIGIT | mute on|off | status"
+case "${1:-}" in
+dial|dtmf|mute)	[ $# -eq 2 ] || { echo "$usage" >&2; exit 2; } ;;
+answer|hangup|reject|voicemail|status) ;;
+*)	echo "$usage" >&2; exit 2 ;;
+esac
+exec python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect("/run/s22-call.sock")
+except OSError as e:
+    sys.exit("s22-call: s22-calld not reachable: %s" % e)
+s.sendall(" ".join(sys.argv[1:]).encode())
+print(s.recv(4096).decode().rstrip())
+' "$@"

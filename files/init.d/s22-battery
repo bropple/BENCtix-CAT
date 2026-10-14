@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Battery log on the SD card and power-off at low battery (D027).
+
+description="Battery log and low-battery power-off"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-batteryd
+command_args="${BATTERY_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-battery.log
+error_log=/var/log/s22-battery.log
+
+depend() {
+	need localmount
+	after s22-notifyd
+}

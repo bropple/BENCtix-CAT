@@ -1,0 +1,17 @@
+Lock screen
+Digits	Type the PIN (shown as dots). It unlocks as soon as the PIN is right.
+C	Delete a digit.
+OK	Unlock (or try the PIN typed).
+End held	Power off or reboot.
+Side key	Notifications and quick settings.
+
+- After 5 wrong PINs it waits 30 seconds, then twice as long after each further mistake.
+- Settings, Security sets, changes or removes the PIN, and how soon the phone locks after the screen goes dark.
+- A ringing or ongoing call shows over the lock screen.
+- Its wallpaper is chosen in Settings, Display (none while music shows its cover).
+
+# Music on the lock screen
+- While a song is loaded, its cover fills the background and its card shows under the date.
+OK	Play or pause, until a digit of the PIN is typed (then OK unlocks).
+Left, Right	The song before or after; held, scrub back or ahead.
+- Tap the card's buttons, or its bar to jump there.

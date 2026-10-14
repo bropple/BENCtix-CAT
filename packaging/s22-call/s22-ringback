@@ -1,0 +1,44 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-ringback: the ringback tone a caller hears while the other phone
+rings (North America: 440 + 480 Hz, 2 s on, 4 s off), as raw 48 kHz stereo
+S16_LE on stdout until killed. s22-calld plays it on the earpiece while an
+outgoing call is alerting: the network leaves that tone to the phone.
+
+  s22-ringback | aplay -t raw -f S16_LE -r 48000 -c 2 -D hw:0,0
+"""
+import math, struct, sys
+
+RATE = 48000
+ON_S, OFF_S = 2.0, 4.0
+LEVEL = 0.12                # of full scale, each of the two tones
+RAMP = int(RATE * 0.01)     # 10 ms in and out, no clicks
+
+
+def cycle():
+    n = int(RATE * ON_S)
+    out = bytearray()
+    for i in range(n):
+        env = min(1.0, i / RAMP, (n - 1 - i) / RAMP)
+        v = LEVEL * env * (math.sin(2 * math.pi * 440 * i / RATE) +
+                           math.sin(2 * math.pi * 480 * i / RATE))
+        s = int(v * 32767)
+        out += struct.pack("<hh", s, s)
+    out += bytes(4 * int(RATE * OFF_S))
+    return bytes(out)
+
+
+def main():
+    one = cycle()
+    w = sys.stdout.buffer
+    try:
+        while True:
+            w.write(one)
+            w.flush()
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

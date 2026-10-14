@@ -1,0 +1,63 @@
+Game Boy and NES
+- Put your games in Games/gb (.gb, .gbc) and Games/nes (.nes) on the SD card; the apps are in the Games folder on the home screen.
+- Pick a game from the list with OK.
+
+# Playing (the defaults)
+D-pad	The arrows, or 2 4 6 8.
+A	3, 9 or OK.
+B	1, 7 or C.
+Start	#
+Select	*
+Back	The menu (the game pauses).
+Volume	Game volume.
+
+# The menu
+- Resume, Save state, Load state, Restart game, Controls, Choose another game, Quit.
+- Controls changes the keys (up to 3 per button), and adds Turbo A and Turbo B.
+- The game saves as it goes, and continues where it was the next time you open it.
+- The screen stays on while a game runs; it pauses when the screen turns off or another window comes up.
+
+# Doom
+- Doom (UZDoom) is on the SD card, in the Games folder. Put your WADs (doom.wad, doom2.wad, freedoom2.wad, mods) in Games/doom.
+- With more than one WAD it asks which to play: tap it (the keypad does not reach that window).
+D-pad	Up and Down walk, Left and Right turn. 2 and 8 walk too.
+4 6	Step sideways (strafe). Speaker held: the arrows strafe.
+OK	Fire. 5 and Call fire too.
+C	Use: open doors, press switches. 0 too.
+1 3	The previous and next weapon.
+7 9	Quick save, quick load.
+#	The map.
+*	Running on or off (on to start with).
+Back	The menu.
+- There is no mouselook, and touching the screen does nothing in the game. Options, Controls changes the keys.
+Recents	Typing (a saved game's name), and back to the game's keys.
+- While typing, the keypad types as everywhere else (the mode shows in the status bar); OK is Enter, C erases. It is the game's keys again when you leave the game.
+
+# Luanti
+- Luanti (Minetest) is on the SD card, in the Games folder. Minetest Game is installed; more games and mods are in the main menu's Content tab.
+- The touchscreen looks around: drag to turn, tap to place, hold to dig. The keypad moves.
+D-pad	Up and Down walk, Left and Right turn.
+2 8	Look up and down.
+4 6	Step sideways.
+5 0	Jump, sneak.
+OK	Dig (hold it). Call places.
+C	Drop the item.
+1 3	The previous and next item.
+#	The inventory.
+*	Chat (then Recents to type).
+7 9	Fly, fast (if the world allows).
+Speaker	Held: faster, or down while flying.
+Recents	Typing, and back to the game's keys.
+Back	The menu.
+- Settings, Controls changes the keys.
+
+# Match Filed
+- BENCO: MATCH FILED, in the Games folder. Shoot pieces into the grid; three or more of a kind clear, and what hangs on nothing falls (the gray tiles too). Every 8 shots the striped wall pushes everything down; reach the bottom and the run is filed. Clear all but the wall for the next level.
+Left Right	Aim; held, it turns faster. 4 and 6 too.
+1 3	Aim a hair.
+OK	Fire, start, restart. 5, Up and 2 too.
+*	The laser sight, on or off (or tap "laser" in the bar).
+Back	Pause; Back again quits, OK resumes.
+- A finger on the screen aims, and the shot goes as it lifts.
+- A high score takes three letters: 2-9 as when typing, Up and Down through the alphabet, Left and Right between them, OK files it, Back skips it.
+- It pauses when the lid closes or another window comes up.

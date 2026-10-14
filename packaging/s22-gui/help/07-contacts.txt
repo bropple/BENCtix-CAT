@@ -1,0 +1,12 @@
+Contacts
+Digits	Search: the letters on the keys, or part of a number. C takes one back.
+OK	Open a contact.
+- The first rows make a new contact, or import a .vcf file from the home folder or Downloads (numbers already saved are skipped).
+
+# A contact
+OK on a number	Call it.
+#	Text it.
+*	Change it.
+C, twice	Remove that number.
+- Rows below: speed dials (keys 2 to 9 held in Phone), ringtone, text tone, call and text vibration, rename, add a number, and delete (press twice).
+- Ringtones and vibrations play as you choose them.

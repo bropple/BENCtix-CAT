@@ -1,0 +1,75 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The Android Open Source Project's ringtones, notification and alarm
+# sounds (frameworks/base/data/sounds, Apache-2.0 per its Android.bp),
+# fetched from AOSP's own source at a release tag, never from a phone's
+# stock image (D041). Gitiles makes its tarballs on the fly, so every file
+# is checked against manifest.sha256 instead of the tarballs' checksums.
+
+pkgname=aosp-sounds
+pkgver=15.0.0_r1
+pkgrel=3
+pkgdesc="Android Open Source Project ringtones, notification and alarm sounds"
+arch=(any)
+url="https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/data/sounds/"
+license=(Apache-2.0)
+_tag=android-${pkgver}
+_archive=https://android.googlesource.com/platform/frameworks/base/+archive/refs/tags/$_tag/data/sounds
+_file=https://android.googlesource.com/platform/frameworks/base/+/refs/tags/$_tag/data/sounds
+# The oldest set (Ring_Classic, F1_New_SMS, ...) sits in data/sounds itself,
+# whose archive is ~100 MB of everything: those come one by one
+_base=(Alarm_Beep_01 Alarm_Beep_02 Alarm_Beep_03 Alarm_Buzzer Alarm_Classic Alarm_Rooster_01 Alarm_Rooster_02 F1_MissedCall F1_New_MMS F1_New_SMS F1_NewVoicemail ring3 Ring_Classic_01 Ring_Classic_02 Ring_Classic_03 Ring_Classic_04 Ring_Classic_05 Ring_Digital_01 Ring_Digital_02 Ring_Digital_03 Ring_Digital_04 Ring_Digital_05 ringer Ring_Synth_01 Ring_Synth_02 Ring_Synth_03 Ring_Synth_04 Ring_Synth_05 )
+source=("ringtones-$pkgver.tar.gz::$_archive/ringtones.tar.gz"
+	"notifications-$pkgver.tar.gz::$_archive/notifications.tar.gz"
+	"alarms-$pkgver.tar.gz::$_archive/alarms.tar.gz"
+	manifest.sha256
+	duplicates)
+noextract=("ringtones-$pkgver.tar.gz" "notifications-$pkgver.tar.gz"
+	   "alarms-$pkgver.tar.gz")
+sha256sums=(SKIP SKIP SKIP 62aeb2e9e0297025941c9cdad4b86afe4095a80670ac3b1553fe4b7c0630a7fb
+	    451d1e970cc806684a875dc86e072c5dfa402ff53f572cec00abc1cc5b734511)
+for _b in "${_base[@]}"; do
+	source+=("$_b.ogg.b64::$_file/$_b.ogg?format=TEXT")
+	sha256sums+=(SKIP)
+done
+
+prepare() {
+	local d b
+	for d in ringtones notifications alarms; do
+		rm -rf "$d"
+		mkdir "$d"
+		tar -xzf "$d-$pkgver.tar.gz" -C "$d"
+	done
+	rm -rf base
+	mkdir base
+	for b in "${_base[@]}"; do
+		base64 -d "$b.ogg.b64" > "base/$b.ogg"
+	done
+	sha256sum --quiet -c manifest.sha256
+}
+
+# One directory a kind: the classic top-level sounds first, then newer
+# ones whose names are not taken, case aside; left out: the _48k
+# resamples, and the sounds in "duplicates" (the same audio as another)
+_install_kind() {
+	local kind=$1 dest="$pkgdir/usr/share/sounds/aosp/$1" f n
+	shift
+	install -d "$dest"
+	for f in "$@"; do
+		[ -f "$f" ] || continue
+		n=${f##*/}
+		case "$n" in *_48k.ogg) continue ;; esac
+		grep -q "^$kind/$n	" "$srcdir/duplicates" && continue
+		# ANDROMEDA and Andromeda: the first one only
+		ls "$dest" | grep -qixF -- "$n" && continue
+		install -m644 "$f" "$dest/$n"
+	done
+}
+
+package() {
+	_install_kind ringtones base/Ring_*.ogg base/ringer.ogg base/ring3.ogg \
+		ringtones/*.ogg ringtones/ogg/*.ogg ringtones/material/ogg/*.ogg
+	_install_kind notifications base/F1_*.ogg notifications/*.ogg \
+		notifications/ogg/*.ogg notifications/material/ogg/*.ogg
+	_install_kind alarms base/Alarm_*.ogg alarms/*.ogg alarms/ogg/*.ogg \
+		alarms/material/ogg/*.ogg
+}

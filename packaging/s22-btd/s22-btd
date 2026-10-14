@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""
+s22-btd: Bluetooth for Settings and the status bars, on BlueZ (D-Bus).
+
+It follows BlueZ's adapter and devices and writes, for the phone's other
+programs:
+  STATE    powered=0|1, discovering=0|1, connected=N (devices),
+           pairing= (the address being paired), confirm=PASSKEY (a code to
+           compare with the device's), show=CODE (a code to type on it)
+  DEVICES  ADDRESS<TAB>NAME<TAB>PAIRED<TAB>CONNECTED<TAB>RSSI<TAB>ICON
+           lines: the paired devices, and those found by the scan going on
+           (named ones only)
+
+CTL (root:wheel 0660) takes one command a connection; the answer comes
+when it is done, then the connection closes:
+  scan on|off           discovery (it stops by itself after SCAN_S)
+  pair ADDRESS          pair, trust, connect: "ok NAME" or "error ..."
+  connect ADDRESS / disconnect ADDRESS / forget ADDRESS
+  confirm yes|no        the answer to STATE's confirm=
+
+The pairing agent (DisplayYesNo) only takes part in pairings started here:
+a code to compare waits for "confirm", a PIN asked by an old device is
+0000, and anything else is refused. Services of paired, trusted devices
+are allowed.
+
+  s22-btd [-v]
+"""
+import grp, os, socket, sys, time
+
+STATE_DIR = "/run/s22-bt"
+STATE = STATE_DIR + "/state"
+DEVICES = STATE_DIR + "/devices"
+CTL = STATE_DIR + "/ctl"
+AGENT = "/s22/agent"
+SCAN_S = 30
+PAIR_MS = 60000
+CONNECT_MS = 20000
+
+VERBOSE = "-v" in sys.argv[1:]
+
+AGENT_XML = """<node><interface name="org.bluez.Agent1">
+<method name="Release"/>
+<method name="RequestPinCode"><arg type="o" direction="in"/><arg type="s" direction="out"/></method>
+<method name="DisplayPinCode"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="RequestPasskey"><arg type="o" direction="in"/><arg type="u" direction="out"/></method>
+<method name="DisplayPasskey"><arg type="o" direction="in"/><arg type="u" direction="in"/><arg type="q" direction="in"/></method>
+<method name="RequestConfirmation"><arg type="o" direction="in"/><arg type="u" direction="in"/></method>
+<method name="RequestAuthorization"><arg type="o" direction="in"/></method>
+<method name="AuthorizeService"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="Cancel"/>
+</interface></node>"""
+
+
+def log(msg):
+    print("%s s22-btd: %s" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg), flush=True)
+
+
+def dbg(msg):
+    if VERBOSE:
+        log(msg)
+
+
+def main():
+    from gi.repository import Gio, GLib
+
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+    st = {"adapter": None, "powered": False, "discovering": False, "pairing": None,
+          "confirm": None, "show": "", "write": 0, "scan_timer": 0}
+    devs = {}                           # path -> properties
+    seen = set()                        # paths found by this scan
+
+    def call(path, iface, method, args=None, timeout=-1):
+        return bus.call_sync("org.bluez", path, iface, method, args, None,
+                             Gio.DBusCallFlags.NONE, timeout, None)
+
+    def call_async(path, iface, method, args, timeout, done):
+        def finish(conn, res):
+            try:
+                conn.call_finish(res)
+                done(None)
+            except GLib.Error as e:
+                done(e)
+        bus.call("org.bluez", path, iface, method, args, None,
+                 Gio.DBusCallFlags.NONE, timeout, None, finish)
+
+    def set_prop(path, iface, name, value):
+        call(path, "org.freedesktop.DBus.Properties", "Set",
+             GLib.Variant("(ssv)", (iface, name, value)))
+
+    def short(e):
+        """BlueZ's error, without the D-Bus wrapping"""
+        msg = e.message.split(": ", 1)[-1] if e.message else str(e)
+        return msg.replace("GDBus.Error:org.bluez.Error.", "")
+
+    # ------------------------------------------------------------ files ---
+    def write_files():
+        st["write"] = 0
+        os.makedirs(STATE_DIR, exist_ok=True)
+        connected = sum(1 for d in devs.values() if d.get("Connected"))
+        pairing = devs.get(st["pairing"], {}).get("Address", "") if st["pairing"] else ""
+        state = ("powered=%d\ndiscovering=%d\nconnected=%d\npairing=%s\nconfirm=%s\n"
+                 "show=%s\n") % (st["powered"], st["discovering"], connected, pairing,
+                                 "%06d" % st["confirm"][1] if st["confirm"] else "",
+                                 st["show"])
+        lines = []
+        for path, d in devs.items():
+            if not d.get("Paired") and not (path in seen and d.get("Name")):
+                continue
+            lines.append("%s\t%s\t%d\t%d\t%s\t%s\n" % (
+                d.get("Address", ""), (d.get("Alias") or d.get("Name") or "").replace("\t", " "),
+                bool(d.get("Paired")), bool(d.get("Connected")),
+                d.get("RSSI", "") if path in seen else "", d.get("Icon", "")))
+        lines.sort(key=lambda l: (l.split("\t")[2] != "1", l.split("\t")[1].lower()))
+        for path, text in ((STATE, state), (DEVICES, "".join(lines))):
+            try:
+                with open(path + ".new", "w") as f:
+                    f.write(text)
+                os.replace(path + ".new", path)
+            except OSError as e:
+                log("%s: %s" % (path, e))
+        return False
+
+    def changed():
+        if not st["write"]:
+            st["write"] = GLib.timeout_add(300, write_files)
+
+    # ------------------------------------------------------ BlueZ state ---
+    def take(path, ifaces):
+        if "org.bluez.Adapter1" in ifaces:
+            a = ifaces["org.bluez.Adapter1"]
+            st["adapter"] = path
+            st["powered"] = bool(a.get("Powered"))
+            st["discovering"] = bool(a.get("Discovering"))
+        if "org.bluez.Device1" in ifaces:
+            devs.setdefault(path, {}).update(ifaces["org.bluez.Device1"])
+            if st["discovering"]:
+                seen.add(path)
+
+    def load():
+        devs.clear()
+        st["adapter"] = None
+        try:
+            objs = call("/", "org.freedesktop.DBus.ObjectManager",
+                        "GetManagedObjects").unpack()[0]
+        except GLib.Error as e:
+            log("BlueZ: %s" % short(e))
+            return
+        for path, ifaces in objs.items():
+            take(path, ifaces)
+        changed()
+
+    def on_added(conn, sender, path, iface, signal, params):
+        p, ifaces = params.unpack()
+        take(p, ifaces)
+        changed()
+
+    def on_removed(conn, sender, path, iface, signal, params):
+        p, ifaces = params.unpack()
+        if "org.bluez.Device1" in ifaces:
+            devs.pop(p, None)
+            seen.discard(p)
+        if "org.bluez.Adapter1" in ifaces and p == st["adapter"]:
+            st["adapter"], st["powered"], st["discovering"] = None, False, False
+        changed()
+
+    def on_props(conn, sender, path, iface, signal, params):
+        what, props, gone = params.unpack()
+        if what == "org.bluez.Adapter1" and path == st["adapter"]:
+            if "Powered" in props:
+                st["powered"] = bool(props["Powered"])
+            if "Discovering" in props:
+                st["discovering"] = bool(props["Discovering"])
+                if not st["discovering"]:
+                    stop_scan_timer()
+        elif what == "org.bluez.Device1":
+            d = devs.setdefault(path, {})
+            d.update(props)
+            for k in gone:
+                d.pop(k, None)
+            if "RSSI" in props and st["discovering"]:
+                seen.add(path)
+        else:
+            return
+        changed()
+
+    for sig, cb in (("InterfacesAdded", on_added), ("InterfacesRemoved", on_removed)):
+        bus.signal_subscribe("org.bluez", "org.freedesktop.DBus.ObjectManager", sig,
+                             None, None, Gio.DBusSignalFlags.NONE, cb)
+    bus.signal_subscribe("org.bluez", "org.freedesktop.DBus.Properties",
+                         "PropertiesChanged", None, None, Gio.DBusSignalFlags.NONE, on_props)
+
+    def by_address(addr):
+        for path, d in devs.items():
+            if d.get("Address", "").upper() == addr.upper():
+                return path
+        return None
+
+    # ------------------------------------------------------------ agent ---
+    def ours(device):
+        return device is not None and device == st["pairing"]
+
+    def on_agent(conn, sender, path, iface, method, params, inv):
+        args = params.unpack()
+        dbg("agent %s" % method)
+        reject = lambda: inv.return_dbus_error("org.bluez.Error.Rejected", "Rejected")
+        if method == "RequestPinCode":
+            return inv.return_value(GLib.Variant("(s)", ("0000",))) if ours(args[0]) \
+                else reject()
+        if method == "DisplayPinCode":
+            st["show"] = args[1] if ours(args[0]) else ""
+            changed()
+            return inv.return_value(None) if ours(args[0]) else reject()
+        if method == "DisplayPasskey":
+            if ours(args[0]):
+                st["show"] = "%06d" % args[1]
+                changed()
+            return inv.return_value(None)
+        if method == "RequestConfirmation":
+            if not ours(args[0]):
+                return reject()
+            st["confirm"] = (inv, args[1])
+            changed()
+            return                      # answered by "confirm"
+        if method == "RequestAuthorization":
+            return inv.return_value(None) if ours(args[0]) else reject()
+        if method == "AuthorizeService":
+            d = devs.get(args[0], {})
+            return inv.return_value(None) if (d.get("Paired") and d.get("Trusted")) or \
+                ours(args[0]) else reject()
+        if method == "RequestPasskey":
+            return reject()             # nothing here can type one
+        if method == "Cancel":
+            if st["confirm"]:
+                st["confirm"] = None
+            st["show"] = ""
+            changed()
+        inv.return_value(None)
+
+    node = Gio.DBusNodeInfo.new_for_xml(AGENT_XML)
+    reg = getattr(bus, "register_object_with_closures2", None) or bus.register_object
+    reg(AGENT, node.interfaces[0], on_agent, None, None)
+
+    def register_agent():
+        try:
+            call("/org/bluez", "org.bluez.AgentManager1", "RegisterAgent",
+                 GLib.Variant("(os)", (AGENT, "DisplayYesNo")))
+            call("/org/bluez", "org.bluez.AgentManager1", "RequestDefaultAgent",
+                 GLib.Variant("(o)", (AGENT,)))
+            dbg("agent registered")
+        except GLib.Error as e:
+            log("agent: %s" % short(e))
+
+    def bluez_up(*_):
+        log("BlueZ is there")
+        load()
+        register_agent()
+
+    def bluez_gone(*_):
+        devs.clear()
+        st.update(adapter=None, powered=False, discovering=False)
+        changed()
+
+    Gio.bus_watch_name_on_connection(bus, "org.bluez", Gio.BusNameWatcherFlags.NONE,
+                                     bluez_up, bluez_gone)
+
+    # --------------------------------------------------------- commands ---
+    def stop_scan_timer():
+        if st["scan_timer"]:
+            GLib.source_remove(st["scan_timer"])
+            st["scan_timer"] = 0
+
+    def scan_over():
+        st["scan_timer"] = 0
+        scan(False, lambda m: None)
+        return False
+
+    def scan(on, reply):
+        if not st["adapter"] or not st["powered"]:
+            return reply("error Bluetooth is off")
+        stop_scan_timer()
+        if on:
+            if not st["discovering"]:
+                seen.clear()
+                try:
+                    call(st["adapter"], "org.bluez.Adapter1", "StartDiscovery")
+                except GLib.Error as e:
+                    return reply("error %s" % short(e))
+            st["scan_timer"] = GLib.timeout_add_seconds(SCAN_S, scan_over)
+            return reply("ok")
+        if st["discovering"]:
+            try:
+                call(st["adapter"], "org.bluez.Adapter1", "StopDiscovery")
+            except GLib.Error:
+                pass
+        return reply("ok")
+
+    def pair(addr, reply):
+        path = by_address(addr)
+        if not path:
+            return reply("error Not found any more: scan again")
+        if st["pairing"]:
+            return reply("error Already pairing")
+        name = devs[path].get("Alias") or addr
+        st["pairing"] = path
+        changed()
+        if st["discovering"]:           # pairing goes better without
+            scan(False, lambda m: None)
+
+        def finished(msg):
+            st["pairing"], st["confirm"], st["show"] = None, None, ""
+            changed()
+            reply(msg)
+
+        def connected(e):
+            finished("ok %s" % name if e is None else "ok %s (not connected: %s)" %
+                     (name, short(e)))
+
+        def paired(e):
+            if e is not None and "AlreadyExists" not in (e.message or ""):
+                return finished("error %s" % short(e))
+            try:
+                set_prop(path, "org.bluez.Device1", "Trusted", GLib.Variant("b", True))
+            except GLib.Error as e2:
+                dbg("trust: %s" % short(e2))
+            log("paired with %s" % name)
+            call_async(path, "org.bluez.Device1", "Connect", None, CONNECT_MS, connected)
+        call_async(path, "org.bluez.Device1", "Pair", None, PAIR_MS, paired)
+
+    def device_call(method, addr, reply):
+        path = by_address(addr)
+        if not path:
+            return reply("error Not found")
+        call_async(path, "org.bluez.Device1", method, None, CONNECT_MS,
+                   lambda e: reply("ok" if e is None else "error %s" % short(e)))
+
+    def forget(addr, reply):
+        path = by_address(addr)
+        if not path or not st["adapter"]:
+            return reply("error Not found")
+        try:
+            call(st["adapter"], "org.bluez.Adapter1", "RemoveDevice",
+                 GLib.Variant("(o)", (path,)))
+        except GLib.Error as e:
+            return reply("error %s" % short(e))
+        log("forgot a device")
+        reply("ok")
+
+    def confirm(yes, reply):
+        c = st["confirm"]
+        if not c:
+            return reply("error Nothing to confirm")
+        st["confirm"] = None
+        changed()
+        if yes:
+            c[0].return_value(None)
+        else:
+            c[0].return_dbus_error("org.bluez.Error.Rejected", "Rejected")
+        reply("ok")
+
+    def command(line, reply):
+        cmd, _, arg = line.strip().partition(" ")
+        arg = arg.strip()
+        if cmd == "scan" and arg in ("on", "off"):
+            return scan(arg == "on", reply)
+        if cmd == "pair" and arg:
+            return pair(arg, reply)
+        if cmd in ("connect", "disconnect") and arg:
+            return device_call(cmd.capitalize(), arg, reply)
+        if cmd == "forget" and arg:
+            return forget(arg, reply)
+        if cmd == "confirm" and arg in ("yes", "no"):
+            return confirm(arg == "yes", reply)
+        reply("error Unknown command")
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    try:
+        os.unlink(CTL)
+    except OSError:
+        pass
+    ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ctl.bind(CTL)
+    ctl.listen(4)
+    try:
+        os.chown(CTL, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    os.chmod(CTL, 0o660)
+
+    def on_ctl(*_):
+        conn, _ = ctl.accept()
+        conn.settimeout(2)
+        try:
+            line = conn.recv(256).decode("utf-8", "replace")
+        except OSError:
+            conn.close()
+            return True
+
+        def reply(msg):
+            try:
+                conn.sendall((msg + "\n").encode())
+            except OSError:
+                pass
+            conn.close()
+        command(line, reply)
+        return True
+    GLib.io_add_watch(ctl.fileno(), GLib.IO_IN, on_ctl)
+
+    loop = GLib.MainLoop()
+    try:
+        from gi.repository import GLibUnix
+        signal_add = GLibUnix.signal_add
+    except ImportError:
+        signal_add = GLib.unix_signal_add
+    signal_add(GLib.PRIORITY_DEFAULT, 15, loop.quit)
+    signal_add(GLib.PRIORITY_DEFAULT, 2, loop.quit)
+    changed()
+    log("ready")
+    loop.run()
+    try:
+        call("/org/bluez", "org.bluez.AgentManager1", "UnregisterAgent",
+             GLib.Variant("(o)", (AGENT,)))
+    except GLib.Error:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

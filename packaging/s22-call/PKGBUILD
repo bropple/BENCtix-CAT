@@ -1,0 +1,26 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Voice calls without a GUI (D028). The OpenRC service is in files/init.d.
+
+pkgname=s22-call
+pkgver=0.17
+pkgrel=1
+pkgdesc="Cat S22 Flip: voice calls (ring, answer with the lid or Call key, call audio)"
+arch=(aarch64)
+license=(GPL-2.0-only)
+depends=(python python-gobject libqmi alsa-lib alsa-utils s22-notify)
+optdepends=("libpulse: pactl, other sound turned down and muted in calls (D085)"
+            "playerctl: media players paused in calls")
+source=(s22-calld s22-call s22-mictest s22-ringback s22-pcmhold.c)
+sha256sums=(SKIP SKIP SKIP SKIP SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-pcmhold s22-pcmhold.c -lasound
+}
+
+package() {
+	install -Dm755 s22-calld "$pkgdir/usr/bin/s22-calld"
+	install -Dm755 s22-call "$pkgdir/usr/bin/s22-call"
+	install -Dm755 s22-mictest "$pkgdir/usr/bin/s22-mictest"
+	install -Dm755 s22-ringback "$pkgdir/usr/bin/s22-ringback"
+	install -Dm755 s22-pcmhold "$pkgdir/usr/bin/s22-pcmhold"
+}

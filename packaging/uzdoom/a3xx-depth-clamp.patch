@@ -1,0 +1,20 @@
+diff --git a/src/common/rendering/gles/gles_system.cpp b/src/common/rendering/gles/gles_system.cpp
+index abe0298..c91b7fe 100644
+--- a/src/common/rendering/gles/gles_system.cpp
++++ b/src/common/rendering/gles/gles_system.cpp
+@@ -249,6 +249,15 @@ namespace OpenGLESRenderer
+ 			gles.anistropicFilterAvailable = true;
+ 		}
+ 
++		// BENCtix-CAT: freedreno offers depth clamp on the Adreno 3xx
++		// (GL_EXT_depth_clamp), but depth is not clamped: sector floors and
++		// ceilings reaching behind the camera were drawn over the walls.
++		if (gles.modelstring && !strncmp(gles.modelstring, "FD3", 3))
++		{
++			Printf("GLES: no depth clamp on %s\n", gles.modelstring);
++			gles.depthClampAvailable = false;
++		}
++
+ 		setGlVersion(glVersion);
+ 	}
+ }

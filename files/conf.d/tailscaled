@@ -1,0 +1,7 @@
+# UDP port for direct WireGuard connections
+TAILSCALED_PORT=41641
+# More tailscaled flags
+TAILSCALED_ARGS=""
+# Go runtime: soft memory limit and collector target
+TAILSCALED_GOMEMLIMIT=48MiB
+TAILSCALED_GOGC=50

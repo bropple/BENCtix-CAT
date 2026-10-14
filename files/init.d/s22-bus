@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+# The GUI user's session D-Bus (D047), at /run/s22-gui/bus, as a systemd
+# login would give it: the sound server (s22-audio) and the GUI's programs
+# (s22-gui) share it.
+
+description="Session message bus for the GUI's user"
+
+: ${GUI_USER:=micro}
+supervisor=supervise-daemon
+command=/usr/bin/dbus-daemon
+command_args="--session --nofork --nopidfile --address=unix:path=/run/s22-gui/bus"
+command_user="${GUI_USER}:${GUI_USER}"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+output_log=/var/log/s22-bus.log
+error_log=/var/log/s22-bus.log
+
+depend() {
+	need localmount dbus
+	after s22-settings
+	before s22-audio s22-gui
+}
+
+start_pre() {
+	local home
+	id -u "$GUI_USER" >/dev/null || return 1
+	home=$(getent passwd "$GUI_USER" | cut -d: -f6)
+	checkpath -d -m 0700 -o "$GUI_USER:$GUI_USER" /run/s22-gui
+	checkpath -f -m 0644 -o "$GUI_USER:$GUI_USER" /var/log/s22-bus.log
+	export XDG_RUNTIME_DIR=/run/s22-gui HOME="$home" USER="$GUI_USER"
+}

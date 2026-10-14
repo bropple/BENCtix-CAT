@@ -1,0 +1,9 @@
+post_install() {
+	echo "BENCkernel-CAT: lk2nd boots the 'default' label in /boot/extlinux/extlinux.conf."
+	echo "  Kernel command line: /etc/benckernel-cat/cmdline"
+	echo "  Boot the previous kernel next time: benckernel-cat-update default previous"
+}
+
+post_upgrade() {
+	post_install
+}

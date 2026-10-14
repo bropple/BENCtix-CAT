@@ -1,0 +1,21 @@
+# BENCtix-CAT default zsh configuration (from BENCtix's).
+
+# Never prompt on login: oh-my-zsh's update check would block a login shell
+# until answered. oh-my-zsh comes from the pinned clone in the image.
+zstyle ':omz:update' mode disabled
+DISABLE_AUTO_UPDATE="true"
+DISABLE_UPDATE_PROMPT="true"
+
+export ZSH=/usr/share/oh-my-zsh
+ZSH_THEME="@THEME@"
+plugins=(git sudo colored-man-pages)
+# oh-my-zsh is read-only to normal users: keep its cache and completion
+# dump under $HOME
+ZSH_COMPDUMP="$HOME/.zcompdump"
+ZSH_CACHE_DIR="$HOME/.cache/oh-my-zsh"
+mkdir -p "$ZSH_CACHE_DIR/completions" 2>/dev/null
+[ -r "$ZSH/oh-my-zsh.sh" ] && source "$ZSH/oh-my-zsh.sh"
+alias ll='ls -lah --color=auto'
+
+# The console fonts have no "↵": show the exit status with "!" there
+[[ $TERM == linux ]] && RPS1=${RPS1//↵/!}

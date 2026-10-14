@@ -1,0 +1,129 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""s22-maps: Mepo for the keypad phone, with the GPS position (D080).
+
+Starts mepo reading commands on its standard input (-i), gives it the
+keypad's keys (game mode: the number keys type digits, the D-pad and OK
+come through benctix.patch), then holds GPS from s22-gnssd for as long as
+the map is open and moves the position pin (group 6, "user_location") at
+every satellite fix. The first fix centres the map on it. Without a fix it
+opens where the last one was.
+
+  D-pad        pan                 2 4 6 8   pan further
+  1 / 3        zoom out / in       5, OK     centre on me
+  7            Mepo's key help     9         the info bar
+  0            tiles from the network on / off (off: the cached ones only)
+  #            search (s22-maps-search)
+"""
+import json, os, socket, subprocess, sys, threading
+
+CTL = "/run/s22-gnss/ctl"
+STATE = "/run/s22-gnss/state"
+APP_ID = "game-maps"        # s22-wm: the keypad as a game's keys
+
+
+def key(k, *exps, mod="_"):
+    return {"cmd": "bind_key", "args": {"mod": mod, "key": k, "exps": list(exps)}}
+
+
+def move(x, y):
+    return {"cmd": "move_relative", "args": {"rel_x": x, "rel_y": y}}
+
+
+def zoom(d):
+    return {"cmd": "zoom_relative", "args": {"zoom_delta": d}}
+
+
+def toggle(pref):
+    return {"cmd": "preftoggle", "args": {"pref": pref}}
+
+
+ME = [{"cmd": "pin_activate", "args": {"group": 6, "handle": "user_location"}},
+      {"cmd": "center_on_pin", "args": {}}]
+
+SETUP = [
+    {"cmd": "prefset_n", "args": {"pref": "debug_stderr", "value": 0}},
+    {"cmd": "prefset_n", "args": {"pref": "overlay_debugbar", "value": 0}},
+    {"cmd": "prefset_n", "args": {"pref": "fontsize_ui", "value": 15}},
+    {"cmd": "prefset_n", "args": {"pref": "zoom", "value": 15}},
+    {"cmd": "prefset_n", "args": {"pref": "tile_cache_max_n_transfers", "value": 4}},
+    key("h", move(-80, 0)), key("l", move(80, 0)),
+    key("k", move(0, -80)), key("j", move(0, 80)),
+    key("4", move(-240, 0)), key("6", move(240, 0)),
+    key("2", move(0, -240)), key("8", move(0, 240)),
+    key("1", zoom(-1)), key("3", zoom(1)),
+    key("5", *ME), key("x", *ME),
+    key("7", toggle("help")),
+    key("9", toggle("overlay_debugbar")),
+    key("0", toggle("tile_cache_network")),
+    key("g", {"cmd": "shellpipe_sync", "args": {"shellcode": "s22-maps-search"}}),
+]
+
+
+def last_position():
+    st = {}
+    try:
+        with open(STATE) as f:
+            for line in f:
+                k, _, v = line.rstrip("\n").partition("=")
+                st[k] = v
+        return float(st["lat"]), float(st["lon"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def main():
+    env = dict(os.environ, SDL_APP_ID=APP_ID, SDL_VIDEO_WAYLAND_WMCLASS=APP_ID)
+    mepo = subprocess.Popen(["mepo", "-i"], stdin=subprocess.PIPE, env=env, text=True)
+    lock = threading.Lock()
+
+    def send(cmds):
+        with lock:
+            try:
+                mepo.stdin.write(json.dumps(cmds) + "\n")
+                mepo.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                pass
+
+    setup = list(SETUP)
+    pos = last_position()
+    if pos:
+        setup += [{"cmd": "prefset_n", "args": {"pref": "lat", "value": pos[0]}},
+                  {"cmd": "prefset_n", "args": {"pref": "lon", "value": pos[1]}}]
+    send(setup)
+
+    def follow():
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(CTL)
+            s.sendall(b"hold s22-maps\n")
+            f = s.makefile("r")
+            if f.readline().strip() != "ok":
+                return
+        except OSError as e:
+            print("s22-maps: no GPS: %s" % e, file=sys.stderr)
+            return
+        st, first = {}, True
+        for line in f:     # the hold lasts until this process ends
+            line = line.rstrip("\n")
+            if line:
+                k, _, v = line.partition("=")
+                st[k] = v
+                continue
+            if st.get("fix") != "gnss":
+                continue
+            try:
+                lat, lon = float(st["lat"]), float(st["lon"])
+            except (KeyError, ValueError):
+                continue
+            send([{"cmd": "pin_add", "args": {"group": 6, "lat": lat, "lon": lon,
+                                              "handle": "user_location"}}] +
+                 (ME if first else []))
+            first = False
+
+    threading.Thread(target=follow, daemon=True).start()
+    return mepo.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

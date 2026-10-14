@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Status screen on the outer display, s22-outerd (D023): lit for a few
+# seconds when the lid closes, on side/volume/power keys and on
+# notifications, while the lid is closed. s22-outer brings the panel up.
+
+description="Outer display status screen"
+
+command=/usr/bin/s22-outerd
+command_args="${OUTERD_ARGS}"
+command_background=true
+pidfile=/run/s22-outerd.pid
+output_log=/var/log/s22-outerd.log
+error_log=/var/log/s22-outerd.log
+
+depend() {
+	need s22-outer
+	after s22-lidd
+}

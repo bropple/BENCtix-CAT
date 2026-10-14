@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Doom
+Comment=UZDoom with the keypad's controls
+Exec=s22-doom
+StartupWMClass=game-doom
+X-S22-Icon=☠
+X-S22-Color=#b71c1c
+X-S22-Folder=Games

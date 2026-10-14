@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""s22-fileshare: file sharing for Settings (D056), run through sudo by the
+GUI's user (sudoers: /etc/sudoers.d/21-s22-fileshare).
+
+  s22-fileshare status       "on|off", "password=yes|no", "address=IP" lines
+  s22-fileshare on | off     share the home folder (now and at every boot),
+                             or stop
+  s22-fileshare password     reads a password on stdin; if it is the user's
+                             own login password (/etc/shadow), it becomes
+                             the SMB password too
+
+Only the user who runs it through sudo, and only micro (smb.conf's one
+valid user), is acted for. A wrong password costs two seconds.
+"""
+import ctypes
+import hmac
+import os
+import subprocess
+import sys
+import time
+
+SERVICE = "s22-fileshare"
+SHARE_USER = "micro"
+STANDIN = {"LD_LIBRARY_PATH": "/usr/lib/s22-standin"}
+
+
+def run(*cmd, data=None, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    return subprocess.run(cmd, input=data, capture_output=True, text=True, env=e)
+
+
+def samba(*cmd, data=None):
+    """Samba's tools load the libsystemd stand-in too."""
+    return run(*cmd, data=data, env=STANDIN)
+
+
+def caller():
+    user = os.environ.get("SUDO_USER", "")
+    if os.geteuid() != 0 or user != SHARE_USER:
+        print("error: only for " + SHARE_USER + ", through sudo")
+        sys.exit(1)
+    return user
+
+
+def has_password(user):
+    r = samba("pdbedit", "-L")
+    return any(line.split(":")[0] == user for line in r.stdout.splitlines())
+
+
+def is_on():
+    return run("rc-service", SERVICE, "status").returncode == 0
+
+
+def address():
+    r = run("ip", "-4", "-o", "addr", "show", "wlan0")
+    for word in r.stdout.split():
+        if "/" in word and word[0].isdigit():
+            return word.split("/")[0]
+    return ""
+
+
+def login_ok(user, password):
+    """The password against the user's own hash, with libxcrypt."""
+    with open("/etc/shadow") as f:
+        for line in f:
+            fields = line.split(":")
+            if fields[0] == user:
+                stored = fields[1]
+                break
+        else:
+            return False
+    if not stored or stored[0] in "!*":
+        return False
+    lib = ctypes.CDLL("libcrypt.so.2")
+    lib.crypt.restype = ctypes.c_char_p
+    lib.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    out = lib.crypt(password.encode(), stored.encode())
+    return out is not None and hmac.compare_digest(out, stored.encode())
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    user = caller()
+    cmd = sys.argv[1]
+    if cmd == "status":
+        print("on" if is_on() else "off")
+        print("password=" + ("yes" if has_password(user) else "no"))
+        print("address=" + address())
+        return 0
+    if cmd == "on":
+        if not has_password(user):
+            print("error: set the password first")
+            return 1
+        run("rc-update", "add", SERVICE, "default")
+        r = run("rc-service", SERVICE, "start")
+        print("ok" if is_on() else "error: " + (r.stdout + r.stderr).strip()[-200:])
+        return 0 if is_on() else 1
+    if cmd == "off":
+        run("rc-service", SERVICE, "stop")
+        run("rc-update", "del", SERVICE, "default")
+        print("ok")
+        return 0
+    if cmd == "password":
+        password = sys.stdin.readline().rstrip("\n")
+        if not password or not login_ok(user, password):
+            time.sleep(2)
+            print("error: that is not the login password")
+            return 1
+        r = samba("smbpasswd", "-s", "-a", user, data=password + "\n" + password + "\n")
+        if r.returncode != 0:
+            print("error: " + (r.stdout + r.stderr).strip()[-200:])
+            return 1
+        samba("smbpasswd", "-e", user)
+        print("ok")
+        return 0
+    print("error: unknown command " + cmd)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

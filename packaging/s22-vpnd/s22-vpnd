@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""
+s22-vpnd: the phone's VPNs.
+
+Tailscale is always on (tailscaled is its own service). When it needs a
+login, s22-vpnd starts one (`tailscale up --accept-dns=false`, so the
+tailnet's DNS never replaces the system's) and publishes the login URL for
+Settings, which shows it as a QR code; an auth key typed in Settings logs
+in without a browser.
+
+Mullvad is plain WireGuard: MULLVAD, written by s22-vpnd from the account
+number typed in Settings (a new key registered as one of the account's
+devices, a relay in the chosen country), brought up with wg-quick while
+the "mullvad" setting is on. wg-quick's policy rules sit behind
+Tailscale's, so the tailnet (100.64.0.0/10) still goes through Tailscale,
+and Tailscale's own traffic and the LAN stay outside the tunnel. Its DNS
+(through openresolv) is the system's while it is up.
+
+CTL (root:wheel 0660) takes one command a connection and answers, then
+closes (secrets are never logged):
+  ts-key KEY            log Tailscale in with an auth key
+  ts-logout
+  mv-login ACCOUNT      register this phone; "full" and the account's
+                        devices (ID<TAB>NAME<TAB>CREATED) when it has its
+                        maximum
+  mv-replace ACCOUNT ID remove device ID, then register this phone
+  mv-countries          "ok" and CODE<TAB>NAME lines
+  mv-country CODE       a relay in that country
+  mv-logout             remove this phone's device and its config
+
+STATE has, for Settings:
+  tailscale=Running|NeedsLogin|NeedsMachineAuth|Starting|Stopped|none
+  tailscale_name=, tailscale_ip=, tailscale_url= (to log in)
+  mullvad=none (not logged in)|off|connecting|up|error
+  mullvad_relay=, mullvad_country=, mullvad_device=,
+  mullvad_handshake= (seconds ago)
+
+  s22-vpnd [-v]
+"""
+import grp, json, os, random, socket, subprocess, sys, threading, time
+import urllib.error, urllib.request
+
+SETTINGS = "/var/lib/s22/settings"
+STATE_DIR = "/run/s22-vpn"
+STATE = STATE_DIR + "/state"
+CTL = STATE_DIR + "/ctl"
+LIB = "/var/lib/s22-vpn"
+ACCOUNT = LIB + "/mullvad.json"     # account, device, addresses (0600)
+RELAYS = LIB + "/relays.json"
+MULLVAD = "/etc/wireguard/mullvad.conf"
+WG_IF = "mullvad"
+API = "https://api.mullvad.net"
+MULLVAD_DNS = "10.64.0.1"
+MULLVAD_PORT = 51820
+DEFAULT_COUNTRY = "us"
+RELAYS_MAX_AGE = 86400
+SLOW_S = 300            # status refresh when nothing is happening
+FAST_S = 15             # ... while something is on its way
+LOGIN_S = 60            # ... while a login URL waits for the user
+
+VERBOSE = "-v" in sys.argv[1:]
+lock = threading.Lock()  # Mullvad's files and tunnel
+
+
+def log(msg):
+    print("%s s22-vpnd: %s" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg), flush=True)
+
+
+def dbg(msg):
+    if VERBOSE:
+        log(msg)
+
+
+def run(*cmd, timeout=30, input=None):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           input=input)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        dbg("%s: %s" % (cmd[0], e))
+        return None
+    if r.returncode:
+        dbg("%s %s: %s" % (cmd[0], cmd[1] if len(cmd) > 1 else "", r.stderr.strip()))
+    return r
+
+
+def setting(key, default=""):
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == key:
+                    return v
+    except OSError:
+        pass
+    return default
+
+
+def write_private(path, text):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(path + ".new", path)
+
+
+# ------------------------------------------------------------ Tailscale ---
+
+def tailscale_status():
+    r = run("tailscale", "status", "--json", timeout=10)
+    if r is None or r.returncode not in (0, 1) or not r.stdout.strip():
+        return {"tailscale": "none"}
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        return {"tailscale": "none"}
+    me = j.get("Self") or {}
+    ips = me.get("TailscaleIPs") or []
+    return {"tailscale": j.get("BackendState") or "none",
+            "tailscale_name": (me.get("DNSName") or "").rstrip("."),
+            "tailscale_ip": next((i for i in ips if ":" not in i), ips[0] if ips else ""),
+            "tailscale_url": j.get("AuthURL") or ""}
+
+
+# -------------------------------------------------------------- Mullvad ---
+
+class ApiError(Exception):
+    pass
+
+
+def api(method, path, body=None, token=None):
+    req = urllib.request.Request(API + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            code = json.loads(e.read()).get("code") or str(e.code)
+        except ValueError:
+            code = str(e.code)
+        raise ApiError(code)
+    except (urllib.error.URLError, OSError) as e:
+        raise ApiError("NETWORK")
+    return json.loads(data) if data else None
+
+
+API_MESSAGES = {
+    "INVALID_ACCOUNT": "That account number is not valid",
+    "ACCOUNT_NOT_FOUND": "That account number is not valid",
+    "MAX_DEVICES_REACHED": "The account has its maximum number of devices",
+    "NETWORK": "Mullvad cannot be reached (no internet?)",
+}
+
+
+def api_message(e):
+    return API_MESSAGES.get(str(e), "Mullvad said: %s" % e)
+
+
+def token(account):
+    return api("POST", "/auth/v1/token", {"account_number": account})["access_token"]
+
+
+def account_info():
+    try:
+        with open(ACCOUNT) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def relays():
+    """countries -> cities -> relays (Mullvad's public list, cached a day)"""
+    try:
+        if time.time() - os.stat(RELAYS).st_mtime < RELAYS_MAX_AGE:
+            with open(RELAYS) as f:
+                return json.load(f)
+    except (OSError, ValueError):
+        pass
+    try:
+        j = api("GET", "/public/relays/wireguard/v1/")
+    except ApiError:
+        try:                            # an old list beats none
+            with open(RELAYS) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            raise ApiError("NETWORK")
+    os.makedirs(LIB, mode=0o700, exist_ok=True)
+    with open(RELAYS + ".new", "w") as f:
+        json.dump(j, f)
+    os.replace(RELAYS + ".new", RELAYS)
+    return j
+
+
+def pick_relay(country):
+    for c in relays().get("countries", []):
+        if c.get("code") == country:
+            rs = [r for city in c.get("cities", []) for r in city.get("relays", [])]
+            if rs:
+                return random.choice(rs)
+    return None
+
+
+def write_config(acc, relay):
+    addr = ", ".join(a for a in (acc.get("ipv4"), acc.get("ipv6")) if a)
+    write_private(MULLVAD, (
+        "# Written by s22-vpnd: relay %s\n"
+        "[Interface]\nPrivateKey = %s\nAddress = %s\nDNS = %s\n\n"
+        "[Peer]\nPublicKey = %s\nEndpoint = %s:%d\nAllowedIPs = 0.0.0.0/0, ::/0\n") % (
+        relay["hostname"], acc["private_key"], addr, MULLVAD_DNS,
+        relay["public_key"], relay["ipv4_addr_in"], MULLVAD_PORT))
+
+
+def tunnel_up():
+    return os.path.exists("/sys/class/net/" + WG_IF)
+
+
+def mv_register(account):
+    """Register a new key as one of the account's devices"""
+    tok = token(account)
+    key = run("wg", "genkey").stdout.strip()
+    pub = run("wg", "pubkey", input=key + "\n").stdout.strip()
+    try:
+        dev = api("POST", "/accounts/v1/devices", {"pubkey": pub, "hijack_dns": False},
+                  token=tok)
+    except ApiError as e:
+        if str(e) != "MAX_DEVICES_REACHED":
+            raise
+        devs = api("GET", "/accounts/v1/devices", token=tok)
+        return "full\n" + "".join("%s\t%s\t%s\n" % (
+            d.get("id", ""), d.get("name", "?"), (d.get("created") or "")[:10])
+            for d in devs)
+    old = account_info()
+    country = (old or {}).get("country", DEFAULT_COUNTRY)
+    acc = {"account": account, "device_id": dev.get("id"), "device": dev.get("name", ""),
+           "ipv4": dev.get("ipv4_address"), "ipv6": dev.get("ipv6_address"),
+           "private_key": key, "country": country}
+    relay = pick_relay(country) or pick_relay(DEFAULT_COUNTRY)
+    if relay is None:
+        raise ApiError("no relays")
+    with lock:
+        was_up = tunnel_up()
+        if was_up:
+            run("wg-quick", "down", WG_IF)
+        acc["relay"] = relay["hostname"]
+        write_private(ACCOUNT, json.dumps(acc))
+        write_config(acc, relay)
+        if was_up:
+            run("wg-quick", "up", MULLVAD)
+    log("mullvad: this phone is device %s" % acc["device"])
+    return "ok %s" % acc["device"]
+
+
+def mv_replace(account, device_id):
+    tok = token(account)
+    api("DELETE", "/accounts/v1/devices/%s" % device_id, token=tok)
+    log("mullvad: removed a device to make room")
+    return mv_register(account)
+
+
+def mv_logout():
+    acc = account_info()
+    with lock:
+        if tunnel_up():
+            run("wg-quick", "down", WG_IF)
+        for p in (MULLVAD, ACCOUNT):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    if acc and acc.get("device_id"):
+        try:
+            api("DELETE", "/accounts/v1/devices/%s" % acc["device_id"],
+                token=token(acc["account"]))
+        except ApiError as e:
+            log("mullvad: could not remove the device (%s)" % e)
+            return "ok Logged out here; remove the device on mullvad.net"
+    log("mullvad: logged out")
+    return "ok"
+
+
+def mv_country(code):
+    acc = account_info()
+    if not acc:
+        return "error Not logged in to Mullvad"
+    relay = pick_relay(code)
+    if relay is None:
+        return "error No relays in that country"
+    with lock:
+        acc["country"], acc["relay"] = code, relay["hostname"]
+        write_private(ACCOUNT, json.dumps(acc))
+        write_config(acc, relay)
+        if tunnel_up():
+            run("wg-quick", "down", WG_IF)
+            run("wg-quick", "up", MULLVAD)
+    log("mullvad: relay %s" % relay["hostname"])
+    return "ok %s" % relay["hostname"]
+
+
+def mv_countries():
+    return "ok\n" + "".join("%s\t%s\n" % (c.get("code", ""), c.get("name", ""))
+                            for c in sorted(relays().get("countries", []),
+                                            key=lambda c: c.get("name", "")))
+
+
+def mullvad_handshake():
+    """Seconds since the last handshake, or None"""
+    r = run("wg", "show", WG_IF, "latest-handshakes", timeout=5)
+    if r is None or r.returncode:
+        return None
+    for line in r.stdout.splitlines():
+        p = line.split()
+        if len(p) == 2 and p[1].isdigit() and int(p[1]):
+            return max(0, int(time.time()) - int(p[1]))
+    return None
+
+
+# ----------------------------------------------------------------- main ---
+
+def main():
+    from gi.repository import Gio, GLib
+
+    st = {"login": None, "timer": 0, "mullvad_error": False, "handshake": None}
+
+    def write_state(s):
+        os.makedirs(STATE_DIR, exist_ok=True)
+        text = "".join("%s=%s\n" % (k, s.get(k, "")) for k in (
+            "tailscale", "tailscale_name", "tailscale_ip", "tailscale_url",
+            "mullvad", "mullvad_relay", "mullvad_country", "mullvad_device",
+            "mullvad_handshake"))
+        try:
+            with open(STATE + ".new", "w") as f:
+                f.write(text)
+            os.replace(STATE + ".new", STATE)
+        except OSError as e:
+            log("state: %s" % e)
+
+    def login_done(pid, status):
+        log("tailscale login ended (%d)" % os.waitstatus_to_exitcode(status))
+        st["login"] = None
+        schedule(1)
+
+    def tailscale_login():
+        """Start a login; its URL shows in tailscale status"""
+        try:
+            p = subprocess.Popen(["tailscale", "up", "--reset", "--accept-dns=false"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except OSError as e:
+            log("tailscale up: %s" % e)
+            return
+        st["login"] = p
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, login_done)
+        log("tailscale needs a login; started one")
+
+    def stop_login():
+        p = st["login"]
+        if p and p.poll() is None:
+            p.terminate()
+
+    def ts_key(key):
+        st["keying"] = True             # no browser login meanwhile
+        GLib.idle_add(lambda: stop_login() and False)
+        time.sleep(0.5)
+        try:
+            r = run("tailscale", "up", "--reset", "--accept-dns=false",
+                    "--auth-key=" + key, "--timeout=60s", timeout=75)
+        finally:
+            st["keying"] = False
+        if r is None or r.returncode:
+            msg = (r.stderr.strip().splitlines() or ["failed"])[-1] if r else "timed out"
+            return "error %s" % msg.replace(key, "…")
+        log("tailscale: logged in with an auth key")
+        return "ok"
+
+    def ts_logout():
+        r = run("tailscale", "logout", timeout=30)
+        log("tailscale: logged out")
+        return "ok" if r and r.returncode == 0 else "error Could not log out"
+
+    def mullvad():
+        """Bring the tunnel to what the setting says; its state"""
+        want = setting("mullvad", "off") == "on"
+        with lock:
+            have = tunnel_up()
+            if not os.path.exists(MULLVAD):
+                if have:
+                    run("wg-quick", "down", WG_IF)
+                return "none"
+            if want and not have:
+                r = run("wg-quick", "up", MULLVAD)
+                st["mullvad_error"] = r is None or r.returncode != 0
+                if st["mullvad_error"]:
+                    log("mullvad: wg-quick up failed: %s" %
+                        ((r.stderr.strip().splitlines() or ["?"])[-1] if r else "?"))
+                else:
+                    log("mullvad up")
+                have = not st["mullvad_error"]
+            elif not want and have:
+                run("wg-quick", "down", WG_IF)
+                log("mullvad down")
+                have = False
+                st["mullvad_error"] = False
+        if not want:
+            return "off"
+        if not have:
+            return "error"
+        st["handshake"] = mullvad_handshake()
+        # An idle tunnel stops handshaking: one handshake is enough
+        return "up" if st["handshake"] is not None else "connecting"
+
+    def refresh():
+        st["timer"] = 0
+        s = tailscale_status()
+        if s["tailscale"] == "NeedsLogin" and not s["tailscale_url"] and \
+                not st["login"] and not st.get("keying"):
+            tailscale_login()
+        st["handshake"] = None
+        s["mullvad"] = mullvad()
+        acc = account_info() or {}
+        s["mullvad_relay"] = acc.get("relay", "") if s["mullvad"] != "none" else ""
+        s["mullvad_country"] = acc.get("country", "")
+        s["mullvad_device"] = acc.get("device", "")
+        s["mullvad_handshake"] = "" if st["handshake"] is None else str(st["handshake"])
+        write_state(s)
+        if s["tailscale"] not in ("Running", "none", "NeedsLogin") or \
+                s["mullvad"] == "connecting":
+            schedule(FAST_S)
+        else:
+            schedule(LOGIN_S if s["tailscale"] == "NeedsLogin" else SLOW_S)
+        return False
+
+    def schedule(delay):
+        if st["timer"]:
+            GLib.source_remove(st["timer"])
+        st["timer"] = GLib.timeout_add_seconds(int(delay), refresh)
+
+    # ------------------------------------------------- control socket ---
+    def command(line):
+        cmd, _, arg = line.partition(" ")
+        arg = arg.strip()
+        try:
+            if cmd == "ts-key" and arg:
+                return ts_key(arg)
+            if cmd == "ts-logout":
+                return ts_logout()
+            if cmd == "mv-login" and arg:
+                return mv_register("".join(ch for ch in arg if ch.isdigit()))
+            if cmd == "mv-replace" and len(arg.split()) == 2:
+                account, dev = arg.split()
+                return mv_replace("".join(ch for ch in account if ch.isdigit()), dev)
+            if cmd == "mv-countries":
+                return mv_countries()
+            if cmd == "mv-country" and arg:
+                return mv_country(arg.lower())
+            if cmd == "mv-logout":
+                return mv_logout()
+        except ApiError as e:
+            return "error %s" % api_message(e)
+        except Exception as e:          # an answer beats a hung client
+            log("%s: %s" % (cmd, type(e).__name__))
+            return "error %s" % type(e).__name__
+        return "error Unknown command"
+
+    def serve(conn):
+        try:
+            conn.settimeout(10)
+            data = b""
+            while not data.endswith(b"\n") and len(data) < 512:
+                chunk = conn.recv(512)
+                if not chunk:
+                    break
+                data += chunk
+            conn.settimeout(None)
+            reply = command(data.decode("utf-8", "replace").strip())
+            conn.sendall((reply.rstrip("\n") + "\n").encode())
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            GLib.idle_add(lambda: schedule(1) and False)
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    try:
+        os.unlink(CTL)
+    except OSError:
+        pass
+    ctl = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ctl.bind(CTL)
+    ctl.listen(4)
+    try:
+        os.chown(CTL, 0, grp.getgrnam("wheel").gr_gid)
+    except (KeyError, OSError):
+        pass
+    os.chmod(CTL, 0o660)
+
+    def on_ctl(*_):
+        conn, _ = ctl.accept()
+        threading.Thread(target=serve, args=(conn,), daemon=True).start()
+        return True
+    GLib.io_add_watch(ctl.fileno(), GLib.IO_IN, on_ctl)
+
+    # The setting changes; links and addresses change (logins, tunnels, WiFi)
+    mon = Gio.File.new_for_path(SETTINGS).monitor_file(Gio.FileMonitorFlags.NONE, None)
+    mon.connect("changed", lambda *_: schedule(1))
+    nl = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+    nl.bind((0, 0x1 | 0x10 | 0x100))  # RTMGRP_LINK, IPV4_IFADDR, IPV6_IFADDR
+    nl.setblocking(False)
+
+    def on_nl(*_):
+        try:
+            while nl.recv(65536):
+                pass
+        except BlockingIOError:
+            pass
+        schedule(2)
+        return True
+    GLib.io_add_watch(nl.fileno(), GLib.IO_IN, on_nl)
+
+    loop = GLib.MainLoop()
+    try:
+        from gi.repository import GLibUnix
+        signal_add = GLibUnix.signal_add
+    except ImportError:
+        signal_add = GLib.unix_signal_add
+    signal_add(GLib.PRIORITY_DEFAULT, 15, loop.quit)
+    signal_add(GLib.PRIORITY_DEFAULT, 2, loop.quit)
+    schedule(1)
+    log("ready")
+    loop.run()
+    stop_login()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

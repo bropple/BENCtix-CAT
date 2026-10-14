@@ -1,0 +1,8 @@
+# The user the GUI runs as
+#GUI_USER=micro
+# s22-wm options: -t SECONDS is the screen timeout when the settings do not
+# set one
+S22_WM_ARGS=
+# Renderer: pixman (CPU) or gles2 (the GPU, through freedreno; also lets
+# clients hand over dmabufs, as mpv does with hardware-decoded video)
+S22_WM_RENDERER=gles2

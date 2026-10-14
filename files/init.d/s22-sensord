@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# Sensors through the ADSP. The registry comes from the phone itself and is
+# installed from a local copy, never packaged.
+
+description="Cat S22 Flip sensors (s22-sensord)"
+
+command=/usr/bin/s22-sensord
+command_args="-g /var/lib/s22-sensord/groups.txt -r /var/lib/s22-sensord/sns.reg ${SENSORD_ARGS}"
+command_background=true
+pidfile=/run/s22-sensord.pid
+output_log=/var/log/s22-sensord.log
+error_log=/var/log/s22-sensord.log
+
+depend() {
+	need localmount
+	after udev-settle
+}
+
+start_pre() {
+	local f
+	for f in groups.txt sns.reg; do
+		[ -s "/var/lib/s22-sensord/$f" ] && continue
+		eerror "/var/lib/s22-sensord/$f is missing (install it from the local copy)"
+		return 1
+	done
+	modprobe -q uinput
+}

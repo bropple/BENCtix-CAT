@@ -1,0 +1,7 @@
+# BENCtix-CAT (D001). Partitions by GPT label; the eMMC is the only disk
+# with these labels.
+PARTLABEL=userdata  /      btrfs  rw,noatime,compress=zstd:3  0 0
+PARTLABEL=cache     /boot  ext2   rw,noatime                  0 2
+# The microSD card, once formatted as f2fs with this label
+LABEL=s22home       /home  f2fs   rw,noatime,nofail  0 0
+tmpfs               /tmp   tmpfs  rw,nosuid,nodev,mode=1777   0 0

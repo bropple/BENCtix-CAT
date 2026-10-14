@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# Sound (D040): PipeWire, WirePlumber and pipewire-pulse as the GUI's
+# user, in the GUI's runtime directory, on its session bus (s22-bus, D047),
+# so the GUI's programs and the
+# daemons (s22-play) share one mixer. The loudspeaker takes the card's
+# media playback; the amplifier stays at stock's -4 dB.
+
+description="Sound server (PipeWire)"
+
+: ${GUI_USER:=micro}
+supervisor=supervise-daemon
+command=/usr/lib/s22/s22-audio-session
+command_user="${GUI_USER}:${GUI_USER}"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+output_log=/var/log/s22-audio.log
+error_log=/var/log/s22-audio.log
+
+depend() {
+	need localmount dbus s22-bus
+	after s22-settings
+	before s22-gui
+}
+
+start_pre() {
+	local home
+	id -u "$GUI_USER" >/dev/null || return 1
+	home=$(getent passwd "$GUI_USER" | cut -d: -f6)
+	checkpath -d -m 0700 -o "$GUI_USER:$GUI_USER" /run/s22-gui
+	checkpath -f -m 0644 -o "$GUI_USER:$GUI_USER" /var/log/s22-audio.log
+	export XDG_RUNTIME_DIR=/run/s22-gui HOME="$home" USER="$GUI_USER"
+	export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/s22-gui/bus
+	# The card's media playback to the loudspeaker, the amplifier at stock
+	amixer -q -c 0 cset name='QUIN_MI2S_RX Audio Mixer MultiMedia1' 1 2>/dev/null
+	amixer -q -c 0 cset name='Speaker Volume' 184 2>/dev/null
+	return 0
+}

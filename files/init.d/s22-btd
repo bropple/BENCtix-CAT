@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# Bluetooth for Settings and the status bars (/run/s22-bt), and the pairing
+# agent (D037).
+
+description="Bluetooth devices, scanning and pairing"
+
+supervisor=supervise-daemon
+command=/usr/bin/s22-btd
+command_args="${BTD_ARGS}"
+respawn_delay=10
+respawn_max=0
+output_log=/var/log/s22-btd.log
+error_log=/var/log/s22-btd.log
+
+depend() {
+	need dbus
+	after bluetoothd
+}

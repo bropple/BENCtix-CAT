@@ -1,0 +1,17 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# Battery log (on the SD card) and low-battery power-off (D027). The OpenRC
+# service is in files/init.d.
+
+pkgname=s22-battery
+pkgver=0.5
+pkgrel=1
+pkgdesc="Cat S22 Flip: battery log and low-battery power-off"
+arch=(any)
+license=(GPL-2.0-only)
+depends=(python s22-notify)
+source=(s22-batteryd)
+sha256sums=(SKIP)
+
+package() {
+	install -Dm755 s22-batteryd "$pkgdir/usr/bin/s22-batteryd"
+}

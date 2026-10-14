@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Luanti
+Comment=Luanti (Minetest) with the keypad's controls
+Exec=s22-luanti
+StartupWMClass=game-luanti
+X-S22-Icon=⛏
+X-S22-Color=#2e7d32
+X-S22-Folder=Games
+X-S22-Replaces=org.luanti.luanti.desktop

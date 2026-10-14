@@ -1,0 +1,8 @@
+# Vibration per notification source (s22-notify -s SOURCE), re-read when
+# this file changes: on,off,on,... in milliseconds, or none.
+default=200,150,200
+# sms=400
+# mail=100,80,100,80,100
+# alarm=none
+# Strength of every pattern, in percent
+strength=100

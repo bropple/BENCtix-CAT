@@ -1,0 +1,10 @@
+Camera
+OK	Focus (when automatic) and take the photo.
+*	Focus only.
+#	Switch between the rear and front cameras.
+Left, Right	Choose a setting in the bar: exposure, white balance, focus, flash.
+Up, Down	Change that setting.
+Back	Close the camera.
+- Photos are saved to Pictures/Camera.
+- The front camera has fixed focus and no flash, and its view is a mirror.
+- Colours can come out a little red for now.

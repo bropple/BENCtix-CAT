@@ -1,0 +1,31 @@
+Phone
+Left, Right	The tabs: keypad, recent calls, contacts.
+
+# Keypad
+Digits	Type a number. Matching contacts show below it, by number or by the letters on the keys (5-6-2 finds "Jo..."); Up and Down pick one.
+Call, OK	Call.
+1 held	Voicemail (on an empty keypad).
+2 to 9 held	That key's speed dial (set in Contacts).
+C	Delete a digit.
+- Each key beeps its tone at the media volume, unless sounds are off.
+
+# Recent calls and contacts
+Call, OK	Call.
+#	Write a text instead (Messages).
+*	On a recent call: save the number to Contacts, or show its contact.
+
+# A ringing call
+Call, OK	Answer.
+Back, C	Decline.
+Volume	Silence the ringing.
+- Music and other sound turn down while it rings.
+
+# During a call
+Digits	Tones (for menus and voicemail); you hear each one too.
+OK	Mute or unmute.
+Right, speaker key	Speakerphone on or off.
+Volume	Call volume.
+Back	Hide the call screen; the call goes on, and Call brings it back.
+End, lid	Hang up.
+- Holding the phone to your ear turns the screen off and ignores touches.
+- Other sound stops when a call starts (music pauses) and comes back when it ends.

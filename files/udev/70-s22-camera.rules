@@ -1,0 +1,2 @@
+# The Camera app (group video) switches the flash LED (as a torch)
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="white:flash", RUN+="/bin/chgrp video /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

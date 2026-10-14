@@ -1,0 +1,29 @@
+#!/bin/sh
+# s22-lidd hook: WiFi power save follows the lid (D021).
+#   open    power save off: no added latency for ssh and typing (with it on,
+#           the firmware holds packets: ~0.8 s pings)
+#   closed  power save on: about 17 mA less (measured with an inline meter),
+#           unless a Bluetooth audio sink is connected; power save is part of
+#           what made A2DP stutter (D019)
+# Argument: open | closed (from s22-lidd).
+
+case "${1:-}" in
+open)	ps=off ;;
+closed)	ps=on ;;
+*)	echo "usage: $0 open|closed" >&2; exit 2 ;;
+esac
+
+if [ "$ps" = on ] && command -v bluetoothctl >/dev/null; then
+	for mac in $(timeout 5 bluetoothctl devices Connected 2>/dev/null | awk '/^Device / {print $2}'); do
+		if timeout 5 bluetoothctl info "$mac" 2>/dev/null | grep -q 'UUID: Audio Sink'; then
+			ps=off
+			break
+		fi
+	done
+fi
+
+for dev in /sys/class/net/wlan*; do
+	[ -e "$dev" ] || continue
+	iw dev "${dev##*/}" set power_save "$ps" 2>/dev/null
+done
+exit 0

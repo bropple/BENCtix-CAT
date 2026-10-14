@@ -1,0 +1,74 @@
+#!/bin/sh
+# The GUI user's sound server (D040), run by the s22-audio service on the
+# GUI user's session bus (s22-bus): PipeWire, WirePlumber and the PulseAudio server
+# (mpv and friends). When one of them stops, all stop, and the service
+# starts them again. Also: what plays, for the outer screen (D054).
+pipewire &
+p1=$!
+sleep 0.5
+wireplumber &
+p2=$!
+pipewire-pulse &
+p3=$!
+# Stopping takes the whole group with it (supervise-daemon makes this script
+# a session leader): the servers, and the playerctl pipeline below
+trap 'trap - EXIT INT TERM; kill -- -$$ 2>/dev/null' EXIT INT TERM
+# The media volume (0-15, s22-wm's volume keys) on the output named SINK:
+# Media at the start, a Bluetooth device as it connects (below). By name,
+# never the default: at the start the default can still be the loudspeaker
+# itself, whose volume is the amplifier's, and set there it left everything
+# 20 dB quieter (D066)
+media_volume() {
+	id=$(pactl list short sinks 2>/dev/null | awk -v n="$1" '$2 == n { print $1; exit }')
+	[ -n "$id" ] || return 1
+	v=$(sed -n 's/^volume=//p' /var/lib/s22/settings 2>/dev/null | tail -n 1)
+	case "$v" in [0-9]|1[0-5]) ;; *) v=15 ;; esac
+	wpctl set-volume "$id" "$(awk "BEGIN { print $v / 15 }")"
+}
+( for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; media_volume s22.media && break; done ) &
+# What plays (MPRIS: the browser, mpv) for s22-outerd's outer screen:
+# $XDG_RUNTIME_DIR/nowplaying, "STATUS<TAB>ARTIST<TAB>TITLE", rewritten at
+# every change; empty when nothing does
+(
+	np=${XDG_RUNTIME_DIR:-/run/s22-gui}/nowplaying
+	while command -v playerctl >/dev/null; do
+		playerctl --follow metadata \
+			--format '{{status}}	{{artist}}	{{title}}' 2>/dev/null |
+		while IFS= read -r line; do
+			printf '%s\n' "$line" > "$np.new" && mv -f "$np.new" "$np"
+		done
+		: > "$np"
+		sleep 5
+	done
+) &
+# Bluetooth audio (D062): while a Bluetooth output is there it is the
+# default, and Media (the loudspeaker) stays muted, so that whatever
+# WirePlumber moves back to the loudspeaker when the connection drops
+# arrives silent. Then every player (MPRIS: mpv, the browser) is paused,
+# and Media unmuted for whatever plays next.
+(
+	sleep 3
+	had=
+	check() {
+		now=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^bluez_output\./ { print $2 }')
+		if [ -n "$now" ] && [ -z "$had" ]; then
+			pactl set-sink-mute s22.media 1
+			# The media volume to the device (AVRCP)
+			sleep 1
+			media_volume "$(printf '%s\n' "$now" | head -n 1)"
+		elif [ -z "$now" ] && [ -n "$had" ]; then
+			pactl set-sink-mute s22.media 1
+			playerctl -a pause 2>/dev/null
+			sleep 1
+			pactl set-sink-mute s22.media 0
+		fi
+		had=$now
+	}
+	check
+	pactl subscribe 2>/dev/null | while read -r _ _ _ kind _; do
+		[ "$kind" = sink ] && check
+	done
+) &
+while kill -0 $p1 && kill -0 $p2 && kill -0 $p3; do
+	sleep 5
+done 2>/dev/null

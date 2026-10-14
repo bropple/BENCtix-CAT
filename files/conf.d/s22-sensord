@@ -1,0 +1,5 @@
+# Sensors stream on demand: a sensor runs only while a client holds it
+# (s22-sensor, or the control socket /run/s22-sensord.sock). To keep one on
+# without a client, give its report rate in Hz:
+#   -a accelerometer  -p proximity  -l light  -b pressure
+SENSORD_ARGS=

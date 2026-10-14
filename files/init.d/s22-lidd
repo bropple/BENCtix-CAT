@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# The main display follows the lid: off while closed (s22-lidd). Suspend
+# while it is closed is s22-sleepd's (D070); elogind ignores the lid.
+
+description="Main display off while the lid is closed"
+
+command=/usr/bin/s22-lidd
+command_background=true
+pidfile=/run/s22-lidd.pid
+output_log=/var/log/s22-lidd.log
+error_log=/var/log/s22-lidd.log
+
+depend() {
+	need localmount
+	after udev-trigger
+}
+
+stop_post() {
+	# Never leave the display dark without the daemon
+	echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null
+	echo 0 > /sys/class/backlight/backlight/bl_power 2>/dev/null
+	return 0
+}

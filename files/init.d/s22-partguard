@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# Make the eMMC partitions BENCtix-CAT does not write read-only (D003).
+
+description="Protect the bootloader and stock eMMC partitions"
+
+depend() {
+	need dev
+	before localmount fsck
+}
+
+start() {
+	ebegin "Setting stock eMMC partitions read-only"
+	/usr/bin/s22-partguard
+	eend $?
+}

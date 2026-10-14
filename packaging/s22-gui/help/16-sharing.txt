@@ -1,0 +1,13 @@
+File sharing
+- Settings, Network & internet, File sharing shares your home folder with computers on the same Wi-Fi (or the USB cable), to send music, photos and files both ways.
+- The first time, it asks for your phone login password; that is also the share's password. The user name is micro. Nobody else, and no guest, can connect.
+- It only answers home and office networks: never over cellular, Tailscale or the internet.
+
+# Connecting from a computer
+Windows	In File Explorer's address bar: \\ADDRESS\home (Settings shows the address).
+Mac	Finder, Go, Connect to Server: smb://ADDRESS/home
+Linux	In the file manager: smb://ADDRESS/home
+- Music goes in Music, and the Music app finds it at once.
+
+# Switching it off
+- The same row in Settings. It stays on or off across restarts.

@@ -1,0 +1,9 @@
+# Console keymap additions (loaded after "us" by the keymaps service).
+# Mute, volume and power reach their daemons through evdev (s22-outerd,
+# elogind); the console would otherwise turn them into escape codes typed
+# into the tty (volume down is F14). Keys above 255, like the side key, never
+# reach the console.
+keycode 113 = VoidSymbol
+keycode 114 = VoidSymbol
+keycode 115 = VoidSymbol
+keycode 116 = VoidSymbol

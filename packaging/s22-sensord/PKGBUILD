@@ -1,0 +1,24 @@
+# Maintainer: Ben Ropple <36946060+bropple@users.noreply.github.com>
+# The sensor daemon (also in s22flip-linux tools/) and its client. The
+# registry it serves to the ADSP comes from the phone and is installed
+# separately, never packaged.
+
+pkgname=s22-sensord
+pkgver=0.4
+pkgrel=1
+pkgdesc="Cat S22 Flip sensors (accelerometer, proximity, light, pressure) through the ADSP, on demand"
+arch=(aarch64)
+url="https://github.com/bropple/s22flip-linux"
+license=(GPL-2.0-only)
+depends=(glibc python)
+source=(s22-sensord.c s22-sensor)
+sha256sums=(SKIP SKIP)
+
+build() {
+	${CC:-gcc} $CFLAGS $LDFLAGS -o s22-sensord s22-sensord.c
+}
+
+package() {
+	install -Dm755 s22-sensord "$pkgdir/usr/bin/s22-sensord"
+	install -Dm755 s22-sensor "$pkgdir/usr/bin/s22-sensor"
+}

@@ -1,0 +1,57 @@
+#!/bin/sh
+# s22-notify: post a notification. s22-notifyd vibrates (per-source pattern
+# in /var/lib/s22-notify/vibrate), s22-outerd shows it on the outer display.
+#   s22-notify [-s SOURCE] [-o LINK] [-f NUMBER] TEXT...
+#                                    post TEXT from SOURCE (default "default");
+#                                    LINK (e.g. sms:NUMBER) is what opening it
+#                                    in the GUI opens; NUMBER, who it is from
+#                                    (a contact's text tone, s22-notifyd)
+#   s22-notify -l                    list the current notifications, oldest first
+#   s22-notify -c                    clear all of yours (root: all)
+#   s22-notify -d NAME               dismiss one (by file name; group wheel)
+# A notification is a file in /run/s22-notify with "source=", "text=" and
+# maybe "open=" lines.
+set -eu
+DIR=${S22_NOTIFY_DIR:-/run/s22-notify}
+source=default
+open=
+from=
+
+case "${1:-}" in
+-l)	for f in $(ls -tr "$DIR" 2>/dev/null); do
+		s=$(sed -n 's/^source=//p' "$DIR/$f"); t=$(sed -n 's/^text=//p' "$DIR/$f")
+		[ -n "$t" ] || t=$(cat "$DIR/$f")
+		printf '%s: %s\n' "${s:-default}" "$t"
+	done
+	exit 0 ;;
+-c)	find "$DIR" -maxdepth 1 -type f -user "$(id -u)" -delete 2>/dev/null ||
+		find "$DIR" -maxdepth 1 -type f -delete
+	exit 0 ;;
+-d)	[ $# -eq 2 ] || { echo "usage: s22-notify -d NAME" >&2; exit 2; }
+	case "$2" in ""|.*|*/*) echo "s22-notify: bad name" >&2; exit 2 ;; esac
+	rm -f "$DIR/$2" 2>/dev/null || true	# ours: gone; else s22-notifyd does it
+	[ -e "$DIR/$2" ] && : > "$DIR/.dismiss-$2"
+	exit 0 ;;
+""|-h)	echo "usage: s22-notify [-s SOURCE] [-o LINK] TEXT... | -l | -c | -d NAME" >&2; exit 2 ;;
+esac
+while [ $# -ge 3 ]; do
+	case "$1" in
+	-s)	source=$2; shift 2 ;;
+	-o)	open=$2; shift 2 ;;
+	-f)	from=$2; shift 2 ;;
+	*)	break ;;
+	esac
+done
+[ $# -ge 1 ] || { echo "usage: s22-notify [-s SOURCE] [-o LINK] [-f NUMBER] TEXT..." >&2; exit 2; }
+case "$source" in *[!A-Za-z0-9._-]*) echo "s22-notify: SOURCE: letters, digits, . _ - only" >&2; exit 2 ;; esac
+case "$open" in *[!A-Za-z0-9+_.:/@%=?\&#*,-]*) echo "s22-notify: LINK: bad characters" >&2; exit 2 ;; esac
+case "$from" in *[!0-9+*#]*) from= ;; esac
+[ -d "$DIR" ] || { echo "s22-notify: $DIR missing (is s22-notifyd running?)" >&2; exit 1; }
+tmp=$(mktemp "$DIR/.new.XXXXXX")
+{
+	printf 'source=%s\ntext=%s\n' "$source" "$(printf '%s' "$*" | tr '\n' ' ')"
+	[ -z "$open" ] || printf 'open=%s\n' "$open"
+	[ -z "$from" ] || printf 'from=%s\n' "$from"
+} > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$DIR/$(date +%s).$$"

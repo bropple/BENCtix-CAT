@@ -1,0 +1,14 @@
+# A new openssh needs a new sshd (D053): the running listener starts the
+# new per-connection helper, which no longer matches it, and every login
+# is refused until sshd restarts. openssh's own hook only marks sshd for a
+# systemd restart. This restarts the listener (sessions already open stay)
+# once the new config checks out.
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = openssh
+
+[Action]
+Description = BENCtix-CAT: restarting sshd for the new openssh
+When = PostTransaction
+Exec = /bin/sh -c '/usr/bin/sshd -t && rc-service --ifstarted sshd restart'

@@ -1,0 +1,68 @@
+#!/bin/sh
+# s22-mictest [SECONDS]: try the call microphone's gain (D039). Records the
+# keypad microphone (AMIC1) through the gains a call uses (call_mic_adc and
+# call_mic_digital in /var/lib/s22/settings, as s22-calld reads them), says
+# how loud it was, and plays it back on the earpiece at the call volume.
+# Settings > Developer options runs it; group audio is enough.
+set -u
+secs=${1:-4}
+SETTINGS=/var/lib/s22/settings
+get() { sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tail -n 1; }
+c() { amixer -q -c 0 cset name="$1" "$2" >/dev/null 2>&1; }
+
+if grep -q '^call ' /run/s22-call/state 2>/dev/null; then
+	echo "In a call: try again after it"
+	exit 1
+fi
+adc=$(get call_mic_adc); adc=${adc:-4}
+dig=$(get call_mic_digital); dig=${dig:-88}
+vol=$(get call_volume); vol=${vol:-4}
+case "$vol" in [1-7]) ;; *) vol=4 ;; esac
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/s22-mictest.XXXXXX") || exit 1
+restore() {
+	c 'MultiMedia2 Mixer TERT_MI2S_TX' 0
+	c 'PRI_MI2S_RX Audio Mixer MultiMedia1' 0
+	c 'EAR_S' ZERO
+	c 'ADC1 Volume' 0
+	c 'TX1 Digital Volume' 84
+	rm -f "$tmp"
+}
+trap restore EXIT
+trap 'exit 1' INT TERM
+
+c 'MultiMedia2 Mixer TERT_MI2S_TX' 1
+c 'CIC1 MUX' AMIC
+c 'DEC1 MUX' ADC1
+c 'ADC1 Volume' "$adc"
+c 'TX1 Digital Volume' "$dig"
+echo "Recording ${secs} s: speak as on a call"
+if ! arecord -q -D hw:0,1 -f S16_LE -r 48000 -c 2 -d "$secs" -t wav "$tmp" 2>/dev/null; then
+	echo "Recording failed"
+	exit 1
+fi
+c 'MultiMedia2 Mixer TERT_MI2S_TX' 0
+
+# The loudest moment of the left channel (DEC1, the keypad mic), in dBFS
+peak=$(python3 - "$tmp" <<'EOF'
+import array, math, sys, wave
+w = wave.open(sys.argv[1])
+a = array.array("h", w.readframes(w.getnframes()))
+p = max((abs(x) for x in a[::w.getnchannels()]), default=0)
+print("%.0f" % (20 * math.log10(p / 32768)) if p else "-inf")
+EOF
+)
+
+echo "Playing back on the earpiece"
+c 'PRI_MI2S_RX Audio Mixer MultiMedia1' 1
+c 'RX1 MIX1 INP1' RX1
+c 'EAR_S' Switch
+c 'RX1 Digital Volume' $((84 + (vol - 4) * 4))
+aplay -q -D hw:0,0 "$tmp" 2>/dev/null || echo "Playback failed"
+case "$peak" in
+-inf)	echo "Silent: nothing came from the microphone" ;;
+*)	if [ "$peak" -ge -1 ]; then hint="clipping: lower it"
+	elif [ "$peak" -le -24 ]; then hint="quiet: raise it"
+	else hint="good"; fi
+	echo "Loudest ${peak} dBFS ($hint)" ;;
+esac

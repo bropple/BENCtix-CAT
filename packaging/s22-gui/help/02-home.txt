@@ -1,0 +1,10 @@
+Home screen
+Arrows	Move between apps.
+OK, Call	Open the app.
+1 to 9	Open the app in that place (the small number on its tile).
+Back, Home	Close an open folder.
+
+- Game Boy and NES are in the Games folder. OK opens it; Back, Home, or coming back to the home screen, closes it.
+- Tap a tile to open it; drag to see more rows.
+- Programs installed on the SD card with pacman-sd get tiles here too.
+- A red number on Messages counts the unread texts, and on Phone the missed calls. Dismissing a notification leaves it: it goes when you open the conversation, or Phone's Recents. A folder shows the sum of its apps'.
