@@ -4,6 +4,26 @@ From a stock Cat S22 Flip to BENCtix-CAT. You need an unlocked bootloader,
 not root: everything the system needs from your phone is read back through
 lk2nd once it is installed.
 
+**The release archive** (`benctix-cat-<date>.tar.gz` on the
+[releases page](https://github.com/bropple/BENCtix-CAT/releases)) has
+everything from this project in one place, laid out so the steps below find
+it: this repository, s22flip-linux's tools, a prebuilt lk2nd and its DTBO,
+the kernel package and all of BENCtix-CAT's own aarch64 packages. With it
+you skip building lk2nd, the kernel and the packages. `SOURCES.md` in the
+archive names the source commit of every prebuilt file. What comes from your
+phone (firmware, calibration) is never in it: steps 4 and 5 read it from
+your own phone.
+
+```
+benctix-cat-<date>/
+  BENCtix-CAT/                 this repository; run everything from here
+  s22flip-linux/tools/         imgpatch.py, mkmipidbi.py, sns-reg-groups.py
+  lk2nd/lk2nd.img              lk2nd, for the boot partition
+  dtbo-lk2nd/dtbo-cat-s22flip.img   the minimal DTBO
+  out/pkg/                     the kernel package
+  out/benctix-cat/localpkgs/   BENCtix-CAT's own packages
+```
+
 > [!CAUTION]
 > This replaces Android, and it can brick a phone if you go off the path.
 > - **Never flash `sbl1`, `tz`, `rpm`, `aboot`, `devcfg`, or any partition
@@ -17,8 +37,9 @@ lk2nd once it is installed.
 - A Cat S22 Flip and a USB-C cable; optionally a microSD card for `/home`.
 - An x86_64 Linux PC (Arch-family for the build) with android-tools
   (`fastboot`, `lpunpack`, `mkdtboimg`), `mtools`, `e2fsprogs`, `git`,
-  `python3`, `qemu-user-static` registered for aarch64, and the cross
-  compilers `aarch64-linux-gnu-gcc` and `arm-none-eabi-gcc`.
+  `python3` and `qemu-user-static` registered for aarch64. Building from
+  source also takes the cross compilers `aarch64-linux-gnu-gcc` (kernel)
+  and `arm-none-eabi-gcc` (lk2nd); the release archive needs neither.
 - [pil-squasher](https://github.com/linux-msm/pil-squasher), built.
 - This repository and [s22flip-linux](https://github.com/bropple/s22flip-linux)
   checked out side by side.
@@ -74,6 +95,9 @@ fastboot flash boot lk2nd/build-lk2nd-msm8952/lk2nd.img
 fastboot reboot
 ```
 
+With the release archive, flash `../lk2nd/lk2nd.img` and
+`../dtbo-lk2nd/dtbo-cat-s22flip.img` instead of building them.
+
 lk2nd reports `Cat S22 Flip (S22FLIP)`. With nothing installed yet it stays
 in its own fastboot, which `fastboot getvar product` shows as
 `lk2nd-msm8952`. Use only lk2nd's fastboot from here on.
@@ -116,7 +140,10 @@ goes into the image for root and the owner account (`micro` unless you set
 `OWNER_USER`).
 
 Then build the kernel and the root filesystem as the [README](README.md#building)
-describes: `tools/build-benckernel-cat.sh`, then `stages/10` to `50`.
+describes: `tools/build-benckernel-cat.sh`, then `stages/10` to `50`. With
+the release archive, skip the kernel: stage 30 finds it in `out/pkg/`, and
+BENCtix-CAT's own packages in `out/benctix-cat/localpkgs/`, so only Arch
+Linux ARM's packages are downloaded.
 
 ## 7. Flash
 

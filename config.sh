@@ -10,7 +10,7 @@ KERNEL_FRAGMENTS="$KERNEL_SRC/arch/arm64/configs/s22flip.config config/benckerne
 KERNEL_DTB=qcom/qm215-cat-s22flip.dtb
 
 # Package release; the kernel release becomes <version>-<PKGREL>-BENCkernel-CAT
-PKGREL=45
+PKGREL=46
 
 # Build output (never under the kernel tree)
 BUILD_DIR=../out/benckernel
@@ -146,4 +146,8 @@ CACHE_SECTORS=524288
 USERDATA_SECTORS=23879647
 
 # This builder's own settings (not tracked: .gitignore), over the above
-[ -f "${BASH_SOURCE[0]%/*}/config.local.sh" ] && . "${BASH_SOURCE[0]%/*}/config.local.sh"
+# (an if, not &&: without the file, a false last command would fail every
+# script that sources this under set -e)
+if [ -f "${BASH_SOURCE[0]%/*}/config.local.sh" ]; then
+	. "${BASH_SOURCE[0]%/*}/config.local.sh"
+fi

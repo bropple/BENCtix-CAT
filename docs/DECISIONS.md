@@ -2295,3 +2295,25 @@ persist fetched from it matched the running system's SHA-256 byte for byte.
   packages shared on XDA (thread 4626971: V29 full and V30 incremental, rebuilt with
   imgpatch.py; their SHA-256s are in INSTALL.md) or saved with root first.
   It goes back from the stock fastboot, since lk2nd's writes behind itself.
+
+## D089 Releases: one archive with everything from this project (2026-10-14)
+
+A release is the public repo's tag plus one archive on its GitHub release,
+`benctix-cat-<date>.tar.gz`, laid out the way config.sh already expects so
+nothing needs copying: this repository, s22flip-linux's three tools the
+firmware step uses, lk2nd.img and the DTBO, the kernel package in out/pkg
+and all of LOCAL_PKGS in out/benctix-cat/localpkgs (stage 30 skips building
+what it finds there). With it, installing takes no cross compilers and no
+emulated package builds. SOURCES.md in it names each binary's public source
+commit, and the forks carry matching tags (linux benckernel-cat-<rel>,
+lk2nd and dtbo-lk2nd s22flip-<date>) for the GPL.
+
+Nothing in it comes from a phone or from Cat's firmware; the root image is
+not in it, since it carries the user's own firmware. The binaries are built
+for the release from those commits: lk2nd and the DTBO with TZ=UTC (the DTBO
+came out byte-identical to the one in use), the packages natively on the
+phone from `git archive` of packaging/ with the noreply PACKAGER, and the
+kernel as 7.1.3-46, the same source as 45: tools/build-benckernel-cat.sh now
+sets KBUILD_BUILD_TIMESTAMP in UTC and KBUILD_BUILD_USER/HOST to
+benctix@benctix-cat, since 45's version string carried the build host's
+timezone, account and name.

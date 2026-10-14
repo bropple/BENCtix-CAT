@@ -47,6 +47,10 @@ commit=$(git -C "$KSRC" rev-parse --short=12 HEAD)
 kver=$(make -s -C "$KSRC" kernelversion)
 release=$kver-$PKGREL-BENCkernel-CAT
 
+# What the kernel says about its build (uname -v, /proc/version): a UTC
+# time and neutral names, not the builder's timezone, account and host
+export KBUILD_BUILD_TIMESTAMP="$(date -u '+%a %b %e %H:%M:%S UTC %Y')"
+export KBUILD_BUILD_USER=benctix KBUILD_BUILD_HOST=benctix-cat
 M=(make -C "$KSRC" O="$BUILD/obj" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE"
    LOCALVERSION="-$PKGREL-BENCkernel-CAT" -j"$(nproc)")
 

@@ -74,8 +74,8 @@ s22-camera s22-photos: %: %.c libs22ui.a s22ui.h
 	$(CC) $(CFLAGS) -O3 $< libs22ui.a -o $@ $(LDFLAGS) \
 		`$(PKG_CONFIG) --libs $(UI_PKGS) libjpeg` -lm
 
-# The help pages: in help/ here, side by side in makepkg's src/
-HELP = $(wildcard help/[0-9][0-9]-*.txt [0-9][0-9]-*.txt)
+# The help pages, in help/ (PKGBUILD's prepare() copies it for makepkg)
+HELP = $(wildcard help/[0-9][0-9]-*.txt)
 
 install: all
 	install -Dm755 s22-wm $(DESTDIR)$(PREFIX)/bin/s22-wm

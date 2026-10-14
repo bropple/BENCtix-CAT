@@ -3,7 +3,7 @@
 # (seatd, s22-settings, s22-gui) are in files/init.d.
 
 pkgname=s22-gui
-pkgver=0.92
+pkgver=0.93
 pkgrel=1
 pkgdesc="Cat S22 Flip: Wayland compositor (s22-wm), launcher and apps"
 arch=(aarch64)
@@ -15,12 +15,18 @@ makedepends=(wayland-protocols)
 source=(Makefile s22-wm.c s22ui.c s22ui.h s22contacts.c s22sounds.c s22pin.c s22np.c s22badges.c s22-launcher.c s22-settings.c
 	s22-shell.c s22-statusbar.c s22-messages.c s22-touchtest.c s22-camera.c s22-photos.c
 	s22-phone.c s22-contacts.c s22-lock.c s22-emu.c libretro.h s22-help.c s22-match.c s22-pick.c s22-screenshot s22-wallpaper s22-music.c s22-music-tags.c s22-musicd
-	help/00-basics.txt help/01-typing.txt help/02-home.txt help/03-notifications.txt help/04-lock.txt help/05-phone.txt help/06-messages.txt help/07-contacts.txt help/08-settings.txt help/09-camera.txt help/10-photos.txt help/11-browser.txt help/12-shell.txt help/13-games.txt help/14-outer.txt help/15-music.txt help/16-sharing.txt
 	wlr-layer-shell-unstable-v1.xml
 	foot.ini tmux.conf shell.app settings.app messages.app touchtest.app camera.app photos.app
 	phone.app contacts.app gb.app nes.app help.app music.app match.app
 	dark.theme black.theme light.theme)
-sha256sums=(SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP)
+sha256sums=(SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP SKIP)
+
+# The help pages: help/ as it is (makepkg finds a local source by its file
+# name alone, so help/NAME.txt sources were looked up beside the PKGBUILD)
+prepare() {
+	rm -rf "$srcdir/help"
+	cp -r "$startdir/help" "$srcdir/help"
+}
 
 build() {
 	make
